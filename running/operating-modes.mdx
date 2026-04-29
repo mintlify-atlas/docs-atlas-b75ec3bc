@@ -1,0 +1,220 @@
+---
+title: 'Operating Modes: Single, Batch, Self-Dealer, Daemon'
+description: 'pipeline.py has four modes: single run for debugging, batch for volume, self-dealer for cost efficiency, and daemon for unattended continuous operation.'
+---
+
+Every operating mode uses the same `pipeline.py` entry point and switches behavior through command-line flags. Choose based on whether you need a one-off run, bulk throughput, cost-optimized team provisioning, or continuous unattended operation.
+
+<Tabs>
+  <Tab title="Single run">
+
+## Single run
+
+The single-run mode executes one complete pipeline: register → pay → OAuth → write `results.jsonl`. It takes roughly five minutes end-to-end and is the most common mode for debugging because you can observe every step of the chain.
+
+```bash
+xvfb-run -a python pipeline.py --config CTF-pay/config.paypal.json --paypal
+```
+
+The pipeline writes its output to `output/results.jsonl`. On success the record contains the account email, `refresh_token`, `team_account_id`, and payment status.
+
+  </Tab>
+  <Tab title="Batch parallel">
+
+## Batch parallel
+
+Batch mode runs `N` complete pipelines with `M` parallel workers. Parallelism comes from `ThreadPoolExecutor`; each worker runs a full register → pay → OAuth loop.
+
+<CodeGroup>
+
+```bash Basic batch
+xvfb-run -a python pipeline.py --config CTF-pay/config.paypal.json --paypal \
+    --batch 10 --workers 3
+```
+
+```bash With inter-run delay
+xvfb-run -a python pipeline.py --config CTF-pay/config.paypal.json --paypal \
+    --batch 10 --workers 3 --delay 30
+```
+
+</CodeGroup>
+
+| Flag | Meaning |
+|---|---|
+| `--batch N` | Run N complete pipelines in total |
+| `--workers M` | Run M pipelines concurrently |
+| `--delay S` | Sleep S seconds between each run (single-worker mode) |
+
+<Warning>
+**Parallel runs trigger batch association.** Multiple accounts registered within the same time window look like a cohort to anti-fraud systems. Keep `--workers` at 3 or fewer, and use a different proxy, domain, and timing jitter for each worker. See [Anti-Fraud Research](/research/overview) for details.
+</Warning>
+
+  </Tab>
+  <Tab title="Self-dealer">
+
+## Self-dealer
+
+Self-dealer mode provisions a complete ChatGPT Team workspace with one PayPal charge: one owner account pays, and `N` member accounts join the same team. Each member is an independent ChatGPT account with its own OAuth `refresh_token`.
+
+<CodeGroup>
+
+```bash New owner + 4 members
+xvfb-run -a python pipeline.py --config CTF-pay/config.paypal.json --paypal \
+    --self-dealer 4
+```
+
+```bash Resume existing paid owner
+xvfb-run -a python pipeline.py --config CTF-pay/config.paypal.json --paypal \
+    --self-dealer 4 --self-dealer-resume <owner_email>
+```
+
+</CodeGroup>
+
+`--self-dealer-resume` reads `results.jsonl` for the existing owner's `team_account_id` and `refresh_token`, skipping the payment step entirely.
+
+### Internal timing
+
+| Phase | Count | How | Output |
+|---|---|---|---|
+| 1. Register → pay → push downstream | 1 (owner) | `pipeline()` / `card.py` | `team_id` + owner `refresh_token` |
+| 2. Register → invite → accept → push downstream | N (members) | `register()` + invites API + `_exchange_refresh_token_with_session` | N member `refresh_token`s, all bound to the same `team_id` |
+
+### Member loop timing (~3 min per member)
+
+<Steps>
+  <Step title="Pick proxy and subdomain">
+    Select a proxy from the pool and provision a temporary `cardw` config, matching the owner pipeline's setup.
+  </Step>
+  <Step title="Register">
+    Run `register()` — Camoufox solves Turnstile and retrieves the IMAP OTP (~2 min).
+  </Step>
+  <Step title="Send invite">
+    Owner's Bearer calls `POST /backend-api/accounts/{team_id}/invites` with the member's email (&lt;1 s).
+  </Step>
+  <Step title="Accept invite">
+    Member's Bearer calls `POST /backend-api/accounts/{team_id}/invites/accept` (&lt;1 s).
+  </Step>
+  <Step title="Exchange refresh token">
+    `card._exchange_refresh_token_with_session` re-logs in via Camoufox (email + password + consent) to obtain the `refresh_token` (~30 s).
+  </Step>
+  <Step title="Write and push">
+    Append a record to `results.jsonl` in the standard format and push downstream.
+  </Step>
+</Steps>
+
+### Key APIs
+
+```
+POST https://chatgpt.com/backend-api/accounts/{team_id}/invites
+   ↓ owner Bearer, body: {"emails": ["target@..."]}
+
+POST https://chatgpt.com/backend-api/accounts/{team_id}/invites/accept
+   ↓ invitee Bearer
+```
+
+<Note>
+Each member gets its own `proxy_pool.pick()` + `domain_pool.pick()` + temporary cardw config so members are not associated with each other. Any single member failure (register / invite / accept / re-login / CPA) is caught individually; the loop continues to the next member.
+</Note>
+
+### Codex OAuth behavior
+
+Each member triggers two Codex OAuth attempts. The first attempt — made at the end of the `browser_register.py` signup flow using the signup-state hydra session — always fails with `token_exchange_user_error`. The second attempt — a full Camoufox re-login in the login state — succeeds and produces the usable `refresh_token`.
+
+By default `SKIP_SIGNUP_CODEX_RT=1` skips the first attempt. Set it to `0` if you need to observe the legacy path.
+
+  </Tab>
+  <Tab title="Daemon">
+
+## Daemon mode
+
+Daemon mode runs `pipeline.py` as a persistent background service that continuously maintains a target number of usable accounts in the [gpt-team](https://github.com/DanOps-1/gpt-team) recovery pool (`account_usage='recovery'`).
+
+```bash
+# Recommended: background with unbuffered logging
+(nohup xvfb-run -a python3 -u pipeline.py --config CTF-pay/config.paypal.json --paypal --daemon \
+    > output/logs/daemon-$(date +%Y%m%d-%H%M%S).log 2>&1 &)
+
+# Foreground (debug — Ctrl+C for graceful exit)
+xvfb-run -a python3 -u pipeline.py --config CTF-pay/config.paypal.json --paypal --daemon
+```
+
+See the [Daemon mode](/running/daemon-mode) page for the full self-healing reference.
+
+  </Tab>
+</Tabs>
+
+---
+
+## Register-only / pay-only split modes
+
+Split modes let you debug each half of the pipeline independently.
+
+<CodeGroup>
+
+```bash Register only
+python pipeline.py --register-only --cardw-config CTF-reg/config.paypal-proxy.json
+```
+
+```bash Pay only (uses latest account from registered_accounts.jsonl)
+xvfb-run -a python pipeline.py --pay-only --config CTF-pay/config.paypal.json --paypal
+```
+
+</CodeGroup>
+
+---
+
+## Direct card.py invocation
+
+You can bypass the pipeline orchestrator and call `card.py` directly when you need to test or replay specific payment flows.
+
+<CodeGroup>
+
+```bash Standard auto-register payment
+python CTF-pay/card.py auto --config CTF-pay/config.auto.json
+```
+
+```bash Resume from existing checkout session
+python CTF-pay/card.py cs_live_xxx --config CTF-pay/config.auto.json
+```
+
+```bash Use a specific card by index (0-based)
+python CTF-pay/card.py auto --card 1 --config CTF-pay/config.auto.json
+```
+
+```bash Fresh checkout only (no payment)
+python CTF-pay/card.py fresh --fresh-only --config CTF-pay/config.auto.json
+```
+
+```bash Offline replay (no external requests)
+python CTF-pay/card.py auto --config CTF-pay/config.offline-replay.json --offline-replay
+```
+
+```bash Local mock gateway
+python CTF-pay/card.py auto --config CTF-pay/config.local-mock.json --local-mock
+```
+
+</CodeGroup>
+
+### Retry a house decline
+
+```bash
+python CTF-pay/retry_house_decline.py cs_live_xxx --attempts 5
+```
+
+---
+
+## Performance optimization switches
+
+Two environment variables skip known-failing code paths, cutting per-run time significantly. Both default to `1` (skip).
+
+| Variable | Default | Time saved | Notes |
+|---|---|---|---|
+| `SKIP_SIGNUP_CODEX_RT` | `1` | ~30 s/registration | The signup-state hydra session cannot exchange a Codex RT (`token_exchange_user_error`). The usable RT comes from `_exchange_refresh_token_with_session` in the pay or self-dealer re-login step. |
+| `SKIP_HERMES_FAST_PATH` | `1` | 5–10 s/payment | PayPal returns `/checkoutweb/genericError?code=REVGQVVMVA` ("DEFAULT") for non-browser cookied sessions. All payments actually take the browser path. |
+
+Set either variable to `0` to restore the legacy behavior for comparison or when PayPal changes its protocol.
+
+```bash
+SKIP_SIGNUP_CODEX_RT=0 SKIP_HERMES_FAST_PATH=0 \
+    xvfb-run -a python pipeline.py --config CTF-pay/config.paypal.json --paypal
+```

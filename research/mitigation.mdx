@@ -1,0 +1,68 @@
+---
+title: 'Anti-Fraud Mitigation: Improving 24-Hour Survival Rate'
+description: 'What the current pipeline handles, what batch correlation cannot fix, and five ranked strategies to raise ChatGPT Team account survival above the 2% baseline.'
+---
+
+The 2% 24-hour survival rate is not a bug in the tooling — it is a direct consequence of how the pipeline currently uses a single PayPal account, a single egress IP, and a dense registration schedule. This page explains what the existing tooling manages, what it cannot address, and what changes have the highest impact on survival.
+
+## What the current tooling handles
+
+The existing pipeline already addresses several probe-layer risks:
+
+- ✅ **DomainPool + `permanent_burned`** — handles probe-layer permanently flagged domains by excluding them from the rotation
+- ✅ **Webshare API + gost relay** — manages IP lifetime by rotating slots when a proxy accumulates `no_perm` responses (~4–5 registrations per IP)
+- ✅ **Multi-zone domain pool** — distributes registrations across zones to manage Cloudflare quota and zone-level risk
+
+## What the current tooling cannot fix
+
+Two outcomes are structurally outside what the current pipeline can address:
+
+- ❌ **Batch correlation → next-day mass bans:** when daemon mode runs with `target=20`, a single nightly batch audit can reduce the live inventory to 0–1 accounts, effectively resetting to zero each morning
+- ❌ **Domain rotation has no effect on next-day extinction:** switching subdomains or zones does not reduce the shared `(payment_account, egress_ip, fingerprint)` tuple that drives the ban-layer cron — accounts still share the same cohort dimensions regardless of which domain they were created under
+
+<Warning>
+  Running daemon mode with a single PayPal account and a single proxy IP means you are building a cohort that the ban-layer cron will identify and clear in one pass. Multi-domain rotation does not protect against this.
+</Warning>
+
+## How to improve 24-hour survival rate
+
+Ranked by estimated impact on survival:
+
+### 1. Multiple PayPal account pool (strongest signal)
+
+Rotate PayPal accounts after 1–3 uses and space the uses out over time. The payment account is the highest-weight dimension in ban-layer batch correlation. Reducing PayPal reuse rate directly reduces cohort density.
+
+### 2. Multiple proxy IPs across different ISPs and cities
+
+You need IPs from genuinely different ISPs and cities — not multiple slots from the same provider on the same ASN. Experiment 2 showed that a single clean IP from a different ISP achieved 100% `probe=ok` while the prior IP (same ASN) was down to 14%. The ban layer also uses `egress_ip` as a correlation dimension, so spreading registrations across multiple distinct IPs reduces cohort overlap.
+
+### 3. Time distribution
+
+Create 2–3 accounts per day, spaced hours apart, rather than 30+ in a single hour. Dense same-day cohorts are the clearest signal for the batch audit. A narrow `time_window` combined with identical payment account and IP produces an unambiguous cohort for the cron job to act on.
+
+### 4. Camoufox fingerprint diversification
+
+Use `humanize` mode with different OS and screen profiles for each registration. The fingerprint is one of the four dimensions in the ban-layer signal tuple. Diversifying it raises the cost of batch correlation, though the real ROI compared to PayPal and IP diversification is not yet quantified.
+
+### 5. Reduce single PayPal reuse rate
+
+Multiple ChatGPT Team subscriptions initiated by the same PayPal account in a short window is itself a strong fraud signal, independent of the IP or domain. Even if you rotate IPs and domains, a single PayPal account used for many subscriptions narrows your survival margin over time.
+
+## Current pipeline gaps
+
+The pipeline currently implements:
+
+- 60–180 second jitter between registrations
+- Multi-domain rotation across subdomains and zones
+
+All other dimensions — PayPal account, egress IP, and Camoufox fingerprint — are fixed parameters within a run. This means every account in a daemon session shares three of the four ban-layer signal dimensions. The 2% survival rate is the direct result.
+
+## Open research questions
+
+These areas do not yet have sufficient experimental data:
+
+1. **Real ROI of Camoufox fingerprint diversification:** do different OS and screen profiles meaningfully increase cohort distance, or is the fingerprint dimension low-weight compared to PayPal and IP?
+2. **PayPal trust decay curve:** how does survival rate change as a single PayPal account accumulates N Team subscription transactions?
+3. **Optimal time distribution interval:** how many hours must separate registrations for the ban layer to treat them as independent cohorts rather than a single batch?
+4. **Fingerprint reuse vs. IP reuse weight comparison:** holding all other dimensions fixed, which has a larger effect on ban rate — repeating the same fingerprint or repeating the same IP?
+5. **Warm-up behavior path:** does performing normal user activity on an account before the ban-layer cron runs reduce the probability of being included in a batch ban?

@@ -1,0 +1,60 @@
+---
+title: 'gpt-pp-team Config Files: Templates, Load Order, and Setup'
+description: 'gpt-pp-team uses two gitignored JSON config files. Learn how to create them from example templates and how load_config() resolves the active config at runtime.'
+---
+
+The repository ships only `*.example.json` template files — real configs containing credentials are gitignored and never committed. You create your working configs by copying those templates and filling in your values.
+
+<Tip>
+  The web UI wizard (`python -m webui.server`) is the fastest way to generate both config files interactively. It walks you through every required field and writes the finished JSON for you. See [Web UI](/running/webui) for setup instructions.
+</Tip>
+
+## Create working configs from templates
+
+Run these three copy commands from the repository root before your first run:
+
+```bash
+cp CTF-pay/config.paypal.example.json       CTF-pay/config.paypal.json
+cp CTF-reg/config.paypal-proxy.example.json CTF-reg/config.paypal-proxy.json
+cp CTF-reg/config.example.json              CTF-reg/config.noproxy.json
+```
+
+Edit each copied file to replace placeholder values (e.g. `YOUR_IMAP_AUTH_CODE`, `YOUR_PAYPAL_PASSWORD`) with your real credentials.
+
+## Config loading priority
+
+`load_config()` resolves the active config in this order:
+
+1. **`--config <path>`** — an explicit path passed on the command line always wins.
+2. **`CTF-pay/config.auto.json`** — the default location written by the web UI wizard.
+3. **`CTF-pay/config.paypal.example.json`** — read-only fallback used when neither of the above exists.
+
+<Note>
+  Environment variables override config file values at runtime. You can use them to tweak a single parameter without editing the file — see [Environment Variables](/configuration/environment-variables) for the full list.
+</Note>
+
+## Configuration files
+
+<CardGroup cols={2}>
+  <Card
+    title="PayPal config"
+    icon="credit-card"
+    href="/configuration/paypal-config"
+  >
+    The main `CTF-pay/config.paypal.json` file — daemon settings, proxies, Webshare, CPA integration, and browser challenge solver.
+  </Card>
+  <Card
+    title="Registration config"
+    icon="user-plus"
+    href="/configuration/registration-config"
+  >
+    The `CTF-reg/config.paypal-proxy.json` file — mail/IMAP, card details, billing, team plan, captcha, and proxy settings.
+  </Card>
+  <Card
+    title="Environment variables"
+    icon="terminal"
+    href="/configuration/environment-variables"
+  >
+    Runtime overrides for VLM endpoints and performance tuning flags that take priority over config file values.
+  </Card>
+</CardGroup>

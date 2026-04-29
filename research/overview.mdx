@@ -1,0 +1,56 @@
+---
+title: 'ChatGPT Team Anti-Fraud Research: Two-Layer Mechanism'
+description: 'Empirical research on ChatGPT Team anti-fraud: a real-time probe layer and a delayed batch ban cron that together produce a ~2% 24-hour account survival rate.'
+---
+
+This research documents the ChatGPT Team anti-fraud mechanism through empirical batch testing. The core finding is that the system operates two independent layers — a real-time probe layer and a delayed batch ban layer — and that batch correlation, not any single technical control, is the hard limit on account survival.
+
+<Note>
+  All IP addresses in this research use RFC 5737 documentation ranges (`203.0.113.0/24`, `198.51.100.0/24`, `192.0.2.0/24`) as placeholders. Domain names use `*.example`. Account counts and timestamps are unmodified research values.
+</Note>
+
+## Key finding
+
+**Single PayPal + single IP + dense registration → ~2% 24-hour survival rate.**
+
+This is not a tool limitation. It is a hard limit of batch correlation: when all accounts in a cohort share the same payment account, egress IP, and fingerprint within a narrow time window, the ban-layer cron job identifies and removes the entire cohort at once. Improving survival requires reducing shared dimensions across that cohort.
+
+## Two-layer mechanism
+
+### Probe layer (immediate)
+
+The probe layer evaluates each registration request at the time it is made.
+
+- **Signal:** `(egress_ip_string, email_domain_string?)`
+- **Evaluation:** at request time — the response is synchronous
+- **IP lifetime:** ~4–5 registrations per IP before `no_perm`
+- **Domain-level flagging:** rare, applies only to a small set of permanently flagged domains
+
+A `probe=ok` result does not mean the account is stable. It only means the cohort has not yet been audited by the ban layer.
+
+### Ban layer (delayed batch)
+
+The ban layer runs on a scheduled cron and correlates accounts by shared dimensions.
+
+- **Signal:** `(time_window, payment_account, egress_ip, fingerprint)`
+- **Evaluation:** scheduled cron at approximately `00:00 UTC` and `12:00 UTC`
+- **Outcome:** batch correlation → batch ban
+
+Accounts that passed the probe layer intact are banned in bulk when the cron job finds that they share payment account, IP, and fingerprint within the same time window. Seat fill rate has no effect on this outcome.
+
+## Explore the research
+
+<CardGroup cols={2}>
+  <Card title="Experiments" icon="flask-conical" href="/research/experiments">
+    Full data from three controlled experiments: 45-account batch survival, IP dimension comparison, and same-ASN IP switching.
+  </Card>
+  <Card title="Fraud model" icon="shield-alert" href="/research/fraud-model">
+    Corrected two-layer model, refuted early assumptions, and the ASCII architecture diagram.
+  </Card>
+  <Card title="Mitigation" icon="wrench" href="/research/mitigation">
+    What the current tooling handles, what it cannot fix, and ranked strategies for improving 24-hour survival rate.
+  </Card>
+  <Card title="Source" icon="file-text" href="https://github.com/DanOps-1/gpt-pp-team/blob/main/docs/anti-fraud-research.md">
+    Original research document with citation and BibTeX entry.
+  </Card>
+</CardGroup>

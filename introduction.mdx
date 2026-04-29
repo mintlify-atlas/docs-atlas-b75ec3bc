@@ -1,0 +1,78 @@
+---
+title: "gpt-pp-team: End-to-End ChatGPT Team Subscription Toolkit"
+description: "Learn what gpt-pp-team does, its three core capabilities, authorized use scope, legal restrictions, and prerequisites before you install anything."
+---
+
+gpt-pp-team is an end-to-end protocol replay toolkit for the ChatGPT Team subscription flow. It reverse-engineers the full chain from Stripe Checkout through PayPal billing agreement, ChatGPT manual approval, and Codex OAuth + PKCE, and implements each step as a runnable client. Given a clean proxy and a payment credential, a completed pipeline yields an OAuth `refresh_token` written to `output/results.jsonl`.
+
+<Warning>
+  **Authorized use only.** Using this project — including cloning, running, or modifying it — constitutes full agreement to all terms in [NOTICE](https://github.com/DanOps-1/gpt-pp-team/blob/main/NOTICE). Permitted only for: systems you own, authorized CTF/bug bounty in-scope assets, and security research. Fraud, payment circumvention, bulk account creation, TOS violations, and unauthorized targets are strictly prohibited. All legal responsibility lies with the operator. If you cannot confirm your use is lawful, do not run this software.
+</Warning>
+
+## What gpt-pp-team does
+
+The toolkit replays the entire ChatGPT Team subscription protocol — the same sequence a browser performs — as a scriptable, automatable client. From a single command you get account registration (Camoufox + Turnstile), Stripe Checkout replay, PayPal billing agreement authorization, ChatGPT subscription approval, and final Codex OAuth token extraction.
+
+## Three core capabilities
+
+### hCaptcha visual solver
+
+`CTF-pay/hcaptcha_auto_solver.py` is a ~4,000-line standalone hCaptcha solver. It uses a three-layer decision pipeline: a VLM primary path for zero-shot classification, CLIP/OpenCV heuristic fallback covering 12 known hCaptcha challenge types, and a Playwright human-motion executor that synthesizes mouse trajectories and timing to match organic behavior.
+
+### Anti-fraud empirical research
+
+The repository includes real empirical data on ChatGPT's two-layer anti-fraud mechanism: a probe layer that triggers on individual signals and a batch ban layer that retrospectively links registration cohorts. The data covers 45-account batches over 24 hours with an observed ~2% survival rate, plus a corrected model explaining why early assumptions about the mechanism were wrong. See [`docs/anti-fraud-research.md`](https://github.com/DanOps-1/gpt-pp-team/blob/main/docs/anti-fraud-research.md) for the full dataset.
+
+### 12-loop self-healing daemon
+
+`pipeline.py::daemon()` runs continuously without operator intervention. Its 12 recovery loops handle: Webshare API automatic IP rotation, Cloudflare DNS quota cleanup, tmpfs orphan reclamation, gost relay watchdog restart, and DataDome slider auto-drag. The design target is unattended operation over multiple weeks.
+
+## Authorized use scope
+
+The following uses are permitted under the NOTICE terms:
+
+- Systems and accounts you own
+- CTF (Capture the Flag) protocol analysis and replay
+- Bug bounty targets explicitly listed as in-scope in a public program on HackerOne, Bugcrowd, or equivalent
+- Adversarial ML research on the hCaptcha solver component
+- Offline protocol research and teaching without making requests to third-party services
+
+The following uses are explicitly prohibited:
+
+- Fraud against OpenAI, Stripe, PayPal, Cloudflare, or hCaptcha
+- Payment circumvention (chargebacks, stolen payment methods)
+- Bulk account creation for resale or "GPT mirror" services
+- Any target not explicitly authorized by the asset owner
+- Violating OpenAI Terms of Use, Stripe Services Agreement, or PayPal User Agreement
+
+## Prerequisites
+
+Before installation, confirm you have all of the following:
+
+- **PayPal account** — a real, loginable PayPal account with email OTP 2FA. You must complete one manual login on first run. You must also disable mobile push notifications in PayPal settings (Settings → Login management → remove mobile device) or automation will stall waiting for an OTP that goes to push instead of email.
+- **EU/US proxy** — an egress proxy with an EU or US IP address. PayPal enforces EU-only registration for the Stripe account configuration used here; Stripe enforces country restrictions. SOCKS5 proxies with authentication require a `gost` relay (installed in Step 2 of Installation).
+- **Cloudflare zone** — a domain managed in Cloudflare, used to provision catch-all subdomains for registration email addresses. Requires a Cloudflare API token with `Zone:DNS:Edit` and `Zone:Zone:Read` permissions.
+- **Linux with Camoufox and Playwright** — a Linux host (Ubuntu 22.04+ or equivalent) capable of running Camoufox (antidetect Firefox) and Playwright. Requires approximately 2 GB RAM and 5 GB disk.
+- **Optional: VLM API key** — an OpenAI-compatible VLM endpoint for hCaptcha solving. Residential or residential-like IPs rarely trigger hCaptcha; the solver degrades gracefully to CLIP-only without a VLM key.
+- **Optional: CAPTCHA service API key** — a createTask/getTaskResult-compatible CAPTCHA service as a fallback for browser passive captchas.
+
+<Note>
+  First-time setup — including tuning the config and completing the PayPal manual login — typically takes 1–3 hours. Once the daemon is running stably, each pipeline cycle completes in approximately 5 minutes.
+</Note>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Full step-by-step installation: system packages, gost, Python deps, Playwright, ML venv, and Cloudflare token setup.
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get to a running pipeline in five steps — from clone to first output.
+  </Card>
+  <Card title="Architecture" icon="diagram-project" href="/reference/architecture">
+    Subsystem breakdown, file roles, and the full Stripe → PayPal → Codex protocol chain.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/configuration/overview">
+    Every JSON config field, environment variable, and schema reference.
+  </Card>
+</CardGroup>

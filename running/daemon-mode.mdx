@@ -1,0 +1,359 @@
+---
+title: 'Daemon Mode: Unattended Multi-Week Pipeline Operation'
+description: 'Run gpt-pp-team as a persistent background service with 12 self-healing loops covering anti-fraud blocks, proxy failures, CF DNS quota, and process crashes.'
+---
+
+Daemon mode is designed for unattended operation over days or weeks. Every one of the 12 self-healing loops originated from a real failure pattern encountered in production — none were designed speculatively.
+
+---
+
+## Start, stop, and check status
+
+<CodeGroup>
+
+```bash Start (recommended — background with unbuffered logging)
+(nohup xvfb-run -a python3 -u pipeline.py --config CTF-pay/config.paypal.json --paypal --daemon \
+    > output/logs/daemon-$(date +%Y%m%d-%H%M%S).log 2>&1 &)
+```
+
+```bash Follow logs
+tail -f output/logs/daemon-*.log
+```
+
+```bash Check state
+cat output/daemon_state.json | jq .
+```
+
+```bash Graceful stop (waits for current cycle to finish)
+pkill -TERM -f "pipeline.*--daemon"
+```
+
+```bash Force kill (clears Camoufox and Xvfb residuals too)
+pkill -9 -f "pipeline.*--daemon"
+pkill -9 -f camoufox-bin
+pkill -9 -f browser_register
+for pid in $(pgrep Xvfb); do kill -9 $pid; done
+```
+
+</CodeGroup>
+
+---
+
+## Work loop
+
+The daemon loops indefinitely. Each iteration checks whether the usable account count has dropped below the target before running the pipeline.
+
+```python
+loop:
+    sleep poll_interval_s
+
+    if rate_limit hit:
+        continue
+
+    usable = query gpt-team DB (
+        !isBanned && !isDisabled && !noInvitePermission
+        && !expired && seat not full
+    )
+
+    if usable >= target_ok_accounts:
+        continue   # pool is healthy, check again next poll
+
+    try:
+        ensure_gost_alive()       # relay watchdog
+        cleanup_temp_leftovers()  # /tmp orphan cleanup
+        if cf_cleanup_due:
+            cleanup_dead_cf()
+        run_pipeline()
+        clear self-healing flags (if invite=ok)
+    except:
+        route to matching self-healing branch
+        increment consecutive_failures; enter cooldown if threshold exceeded
+```
+
+---
+
+## 12 self-healing loops
+
+| Trigger | Detection | Recovery |
+|---|---|---|
+| **DataDome slider** | `[B-DDC]` / `[B6]` iframe contains slider DOM | Playwright `smoothstep` easing + random jitter simulates human drag |
+| **PayPal pre-filled email** | Email step has `<input disabled value="...">` | Skip input, click Next directly into password step |
+| **Consecutive `no_invite_permission`** | `webshare.refresh_threshold` (default 2) | Webshare API rotates IP → swap gost upstream → sync downstream proxy |
+| **Zone IP rotations exhausted** | `zone_rotate_after_ip_rotations` (default 2) | Switch active CF zone; next provision targets the new zone |
+| **Webshare quota exhausted** | HTTP 402 / 429 from Webshare | Mark `webshare_rotation_disabled`, enter `no_rotation_cooldown_s` (default 3 h) |
+| **`invite=ok` self-heal** | One successful registration | Clear `ip_no_perm_streak`, `zone_ip_rotations`, `webshare_rotation_disabled` |
+| **`/tmp` orphan cleanup** | Daemon start + after every pipeline run | Reclaim Camoufox profiles / `xvfb-run.*` directories older than 30 minutes |
+| **CF DNS quota (Free 200/zone)** | Every `cf_cleanup_every_n_runs` cycles (default 30) | Diff gpt-team DB against live CF records; delete banned/disabled/expired/orphan entries |
+| **Multi-zone quota fallback** | CF returns `400 quota exceeded` | Automatically try the next zone in `zone_names` |
+| **CPA auto-import** | Payment succeeds | Refresh OAuth token → `POST /v0/management/auth-files` to CPA server |
+| **gost relay crash** | Listening port not bound | Kill process, pull fresh Webshare proxy, restart relay |
+| **OAuth `add-phone` wall** | Free-tier account redirected to `/add-phone` on second login | Log and skip |
+
+---
+
+## Self-healing mechanisms in detail
+
+### 1. DataDome slider drag
+
+PayPal shows a DataDome slider in the B-DDC (device fingerprint) and B6 (hermes) phases. When the daemon detects the slider DOM it drags automatically using `smoothstep` easing and random jitter to simulate a human interaction.
+
+```python
+def _try_solve_ddc_slider(page):
+    # Locate slider iframe (src contains ddc/captcha/datadome)
+    for frame in page.frames:
+        if any(k in frame.url for k in ("ddc", "captcha", "datadome")):
+            slider = frame.query_selector('[class*="slider"]')
+            if slider:
+                box = slider.bounding_box()
+                # smoothstep easing + jitter
+                animate_drag(box, distance=240, duration_ms=800, jitter=True)
+                return True
+    return False
+```
+
+This does not consume an IP burn quota slot. On failure the daemon raises `DatadomeSliderError` and retries the current cycle without rotating the IP.
+
+### 2. Webshare IP rotation
+
+```python
+def _rotate_webshare_ip():
+    # 1. Ask Webshare API for a new proxy
+    new_proxy = webshare.refresh_pool(country="US")
+
+    # 2. Kill the local gost relay and restart it pointing at the new upstream
+    _swap_gost_relay(port=18898, upstream=new_proxy)
+
+    # 3. Sync the new proxy to gpt-team global settings
+    if cfg.webshare.sync_team_proxy:
+        team_system.update_global_proxy(new_proxy)
+```
+
+Triggered after `refresh_threshold` (default 2) consecutive `no_invite_permission` responses.
+
+### 3. Multi-zone CF fallback
+
+The Cloudflare Free plan allows 200 DNS records per zone. When a zone fills up:
+
+```python
+try:
+    provisioner.set_active_zone(current_zone).provision()
+except CloudflareQuotaExceeded:
+    next_zone = zone_pool.next(current_zone)
+    state["current_zone"] = next_zone
+    state["zone_ip_rotations"] = 0
+    state["total_zone_rotations"] += 1
+    provisioner.set_active_zone(next_zone).provision()
+```
+
+Zone switching also triggers at the IP dimension: if `zone_rotate_after_ip_rotations` IP rotations within one zone all fail, the daemon treats the entire zone as flagged and moves to the next.
+
+### 4. CF DNS dead subdomain cleanup
+
+Over time the daemon accumulates DNS records for banned, disabled, or expired accounts that still occupy quota. Every `cf_cleanup_every_n_runs` cycles (default 30) it runs a cleanup pass:
+
+```python
+def _cleanup_dead_cf_subdomains():
+    # 1. Pull banned/disabled/expired/no_invite_permission emails from gpt-team DB
+    dead_emails = query_dead_accounts(gpt_team_db_path)
+    dead_subdomains = {e.split("@")[1] for e in dead_emails}
+
+    # 2. List all current catch-all subdomain records from CF
+    cf_records = provisioner.list_subdomains()
+
+    # 3. Find orphans (in CF but absent from gpt-team DB entirely)
+    orphans = cf_records - all_known_subdomains_from_db()
+
+    # 4. Delete the union of dead subdomains and orphans
+    to_delete = (cf_records & dead_subdomains) | orphans
+    for sub in to_delete:
+        provisioner.delete_record(sub)
+```
+
+<Tip>
+One cleanup run in production freed 154 records, recovering more than three quarters of a zone's capacity in a single pass.
+</Tip>
+
+### 5. `/tmp` orphan cleanup
+
+Most Linux distributions back `/tmp` with tmpfs (~1 GB RAM). Camoufox profiles that do not exit cleanly leave orphan directories that gradually exhaust RAM. The daemon clears them at startup and after every pipeline run.
+
+```python
+def _cleanup_temp_leftovers(max_age_s=1800):
+    patterns = [
+        "/tmp/chatgpt_reg_*",
+        "/tmp/xvfb-run.*",
+        "/tmp/pipeline_cardw_*",
+        "/tmp/pipeline_pay_*",
+    ]
+    for pat in patterns:
+        for path in glob.glob(pat):
+            if os.path.getmtime(path) < time.time() - max_age_s:
+                shutil.rmtree(path, ignore_errors=True)
+```
+
+### 6. gost relay watchdog
+
+gost occasionally crashes due to OOM or network errors. The daemon checks the relay at startup and before every pipeline run.
+
+```python
+def _ensure_gost_alive(port=18898):
+    if not is_port_listening(port):
+        proxy = webshare.refresh_pool()
+        _swap_gost_relay(port, proxy)
+        if cfg.webshare.sync_team_proxy:
+            team_system.update_global_proxy(proxy)
+```
+
+### 7. RegistrationError classification
+
+Registration failures are split into infrastructure failures and anti-fraud failures so that transient infrastructure problems do not incorrectly trigger zone rotation.
+
+```python
+INFRA_KEYWORDS = (
+    "InvalidIP", "geoip", "cannot open display",
+    "proxy", "socks5", "camoufox", "connection refused"
+)
+
+def classify_registration_error(exc):
+    msg = str(exc).lower()
+    if any(k in msg for k in INFRA_KEYWORDS):
+        return "infra"   # does not increment zone_reg_fail_streak
+    return "domain_risk"
+```
+
+Only `domain_risk` failures increment `zone_reg_fail_streak`. Infrastructure failures are logged and retried without changing the proxy or zone state.
+
+### 8. CPA auto-import
+
+After a successful payment the daemon automatically pushes the new account to the external CPA system.
+
+```python
+def _cpa_import_after_team(record):
+    rt = record["refresh_token"]
+    # Exchange RT for a fresh access token
+    at = exchange_codex_refresh_token(rt, client_id=cfg.cpa.oauth_client_id)
+    # Push to CPA
+    requests.post(
+        f"{cfg.cpa.base_url}/v0/management/auth-files?name={record['email']}",
+        headers={"Authorization": f"Bearer {cfg.cpa.admin_key}"},
+        json={"access_token": at, "refresh_token": rt, "plan_tag": cfg.cpa.plan_tag},
+    )
+```
+
+<Note>
+When the CPA host sits behind Cloudflare, the daemon uses `curl_cffi` instead of `requests` to bypass CF WAF.
+</Note>
+
+---
+
+## Rate limiting config
+
+Add a `daemon` block to your `config.paypal.json` to control throughput:
+
+```json
+"daemon": {
+  "rate_limit": { "per_hour": 0, "per_day": 0 },
+  "max_consecutive_failures": 5,
+  "consecutive_fail_cooldown_s": 1800,
+  "jitter_before_run_s": [60, 180]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `rate_limit.per_hour` / `per_day` | `0` = unlimited. When set, the daemon sleeps until the next window when the limit is reached. |
+| `max_consecutive_failures` | Enter cooldown after N consecutive failures. |
+| `consecutive_fail_cooldown_s` | Cooldown duration in seconds. |
+| `jitter_before_run_s [min, max]` | Random pre-run sleep window. Prevents exact-interval scheduling from being fingerprinted. |
+
+---
+
+## daemon_state.json
+
+`output/daemon_state.json` persists across restarts so the daemon can resume without losing counters or rotation state.
+
+```json
+{
+  "started_at": "2026-04-27T03:14:22Z",
+  "total_attempts": 761,
+  "total_succeeded": 472,
+  "total_failed": 289,
+  "consecutive_failures": 0,
+  "ip_no_perm_streak": 0,
+  "current_proxy_ip": "198.51.100.X",
+  "total_ip_rotations": 16,
+  "webshare_rotation_disabled": false,
+  "no_perm_cooldown_until": 0,
+  "current_zone": "zone-a.example",
+  "zone_ip_rotations": 0,
+  "total_zone_rotations": 2,
+  "last_stats": {
+    "total_active": 44,
+    "usable": 38,
+    "no_invite_permission": 5
+  }
+}
+```
+
+On process restart `started_at` resets; all other fields carry over.
+
+---
+
+## Monitoring
+
+Configure a Prometheus scraper or a Telegram bot to poll `daemon_state.json`. Key signals to watch:
+
+- **`total_succeeded / total_attempts` ratio** — a sustained drop below ~60 % indicates a structural problem (IP range flagged, zone exhausted).
+- **`consecutive_failures` trending up** — approaching `max_consecutive_failures` means the daemon will enter cooldown soon.
+- **`webshare_rotation_disabled = true` for more than 1 hour** — Webshare quota is exhausted; manual top-up required.
+- **`ip_no_perm_streak` repeatedly hitting 2** — the current IP is consistently returning `no_invite_permission`; rotation is working but the trigger is frequent.
+
+Periodically SSH in and check `pgrep camoufox` — there should be at most one running process. Multiple entries mean browser processes are not exiting cleanly.
+
+Also check tmpfs headroom:
+
+```bash
+df -h /tmp
+```
+
+If usage exceeds 50 %, orphan profiles have not been cleaned up. Remove them manually:
+
+```bash
+rm -rf /tmp/chatgpt_reg_*
+```
+
+---
+
+## Log rotation
+
+Write daemon logs to disk files (not stdout — systemd journal truncates long-running output). Add a logrotate config for production runs:
+
+```
+# /etc/logrotate.d/gpt-pp-team
+/path/to/gpt-pp-team/output/logs/*.log {
+    daily
+    rotate 14
+    compress
+    missingok
+    notifempty
+}
+```
+
+### Useful log queries
+
+```bash
+# Live tail
+tail -f output/logs/daemon-*.log
+
+# Surface rotation and outcome events
+grep -E "ROTATE|FAILED|SUCCEEDED" output/logs/daemon-*.log | tail -50
+
+# Per-IP hit rate
+grep "current_proxy_ip" output/logs/daemon-*.log | sort | uniq -c
+
+# Per-zone usage
+grep "current_zone" output/logs/daemon-*.log | sort | uniq -c
+
+# Anti-fraud trigger count
+grep -c "no_invite_permission" output/logs/daemon-*.log
+```

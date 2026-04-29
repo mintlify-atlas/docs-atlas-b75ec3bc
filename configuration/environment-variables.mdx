@@ -1,0 +1,82 @@
+---
+title: 'Environment Variables Reference for gpt-pp-team Runtime'
+description: 'All supported environment variables for gpt-pp-team: VLM endpoint configuration and performance flags that override config file values at runtime.'
+---
+
+Environment variables take priority over values in `config.paypal.json` at runtime. You can use them to change a single parameter for one run without touching the config file.
+
+<Tip>
+  Set environment variables in your shell profile or pass them inline before the command to keep your config file clean of environment-specific values:
+
+  ```bash
+  CTF_VLM_MODEL=gpt-4o-mini python CTF-pay/card.py auto
+  ```
+</Tip>
+
+---
+
+## VLM endpoint variables
+
+The hCaptcha auto-solver uses a vision-language model (VLM) to identify challenge images. These three variables control which model and endpoint it calls.
+
+<Note>
+  Any OpenAI-compatible endpoint works — you can point these at a local [vLLM](https://github.com/vllm-project/vllm) instance, a self-hosted OpenAI proxy, or any third-party provider gateway that speaks the OpenAI Chat Completions API.
+</Note>
+
+<ParamField body="CTF_VLM_BASE_URL" type="string" default="https://api.openai.com/v1">
+  Base URL for the VLM API endpoint. Override this to route the solver to a different provider or a local inference server.
+
+  ```bash
+  export CTF_VLM_BASE_URL="http://localhost:8000/v1"
+  ```
+</ParamField>
+
+<ParamField body="CTF_VLM_API_KEY" type="string">
+  Bearer token sent in the `Authorization` header when calling the VLM endpoint. Leave unset if your endpoint does not require authentication (e.g. a local vLLM instance with no auth).
+
+  ```bash
+  export CTF_VLM_API_KEY="sk-..."
+  ```
+</ParamField>
+
+<ParamField body="CTF_VLM_MODEL" type="string" default="gpt-4o">
+  Model identifier passed in the `model` field of each VLM request. Change this to use a different model at your chosen endpoint.
+
+  ```bash
+  export CTF_VLM_MODEL="gpt-4o-mini"
+  ```
+</ParamField>
+
+---
+
+## Performance tuning flags
+
+These variables skip known slow or failure-prone code paths, reducing per-account and per-payment run time without affecting correctness.
+
+<ParamField body="SKIP_SIGNUP_CODEX_RT" type="string" default="1">
+  Skip the OAuth route during signup that consistently fails for non-browser clients, saving approximately 30 seconds per account. Set to `0` only if you are specifically debugging that code path.
+
+  ```bash
+  export SKIP_SIGNUP_CODEX_RT="1"
+  ```
+</ParamField>
+
+<ParamField body="SKIP_HERMES_FAST_PATH" type="string" default="1">
+  Skip the PayPal endpoint that returns `genericError` for non-browser sessions, saving 5–10 seconds per payment. Set to `0` only if you are debugging the Hermes payment path.
+
+  ```bash
+  export SKIP_HERMES_FAST_PATH="1"
+  ```
+</ParamField>
+
+---
+
+## Priority order
+
+Environment variables always override the corresponding config file fields. The full resolution order is:
+
+1. Environment variable (highest priority)
+2. `--config <path>` file or `config.auto.json`
+3. `config.paypal.example.json` fallback (read-only)
+
+See [Configuration Overview](/configuration/overview) for more detail on how `load_config()` resolves the active config file.

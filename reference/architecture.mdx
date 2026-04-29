@@ -1,0 +1,250 @@
+---
+title: 'gpt-pp-team Architecture: Subsystems and Protocol Chains'
+description: 'Breakdown of pipeline flow, file organization, subsystem roles, protocol chains, exception classes, output schemas, and external system boundaries.'
+---
+
+The gpt-pp-team pipeline orchestrates three major phases in sequence: account registration via `CTF-reg/`, payment authorization via `CTF-pay/card.py`, and OAuth token acquisition via Codex PKCE. This page maps the internals so you can navigate the codebase and reason about failures at each stage.
+
+---
+
+## Pipeline flow
+
+```
+pipeline.py
+  → CTF-reg/browser_register.py   (Camoufox + Cloudflare Turnstile)
+  → CTF-pay/card.py               (Stripe Checkout replay)
+  → Stripe confirm + ChatGPT /approve
+  → Camoufox PayPal billing agreement
+  → Stripe poll (state=succeeded)
+  → Camoufox second login — Codex OAuth + PKCE
+  → refresh_token → output/results.jsonl
+  → (optional) push to gpt-team / CPA / downstream
+```
+
+---
+
+## File organization
+
+```
+gpt-pp-team/
+├── pipeline.py                     # Orchestrator: single / batch / daemon / self-dealer
+├── CTF-pay/                        # Stripe + PayPal protocol replay
+│   ├── card.py                     # Main program, ~8000 lines
+│   ├── hcaptcha_auto_solver.py     # Visual solver (VLM + CLIP + Playwright)
+│   ├── hcaptcha_bridge_helper.py   # Interactive debug tool
+│   ├── local_mock_gateway.py       # Stripe state machine local mock
+│   ├── retry_house_decline.py      # Terminal decline state retry wrapper
+│   └── config.*.json               # Templates committed; runtime configs gitignored
+├── CTF-reg/                        # ChatGPT registration subsystem
+│   ├── browser_register.py         # Camoufox real-browser registration
+│   ├── auth_flow.py                # Pure HTTP registration (fallback)
+│   ├── sentinel.py                 # OpenAI Sentinel PoW token
+│   ├── mail_provider.py            # IMAP catch-all OTP retrieval
+│   ├── http_client.py              # curl_cffi / requests factory
+│   └── config.py                   # Dataclass config definitions
+├── docs/                           # Detailed documentation
+└── output/                         # Runtime artifacts (gitignored)
+    ├── results.jsonl
+    ├── registered_accounts.jsonl
+    ├── daemon_state.json
+    └── logs/
+```
+
+---
+
+## Subsystems
+
+### `CTF-pay/` — payment protocol replay
+
+#### `card.py` (~8000 lines)
+
+`card.py` is intentionally a single large file partitioned by feature area rather than split into modules. The protocol chain is linear, and splitting it would increase cross-file navigation cost and make inter-stage state passing messy.
+
+| Section | Approximate lines | Contents |
+|---|---|---|
+| Config loading | 200–600 | `load_config()`, JSON validation, CLI parsing |
+| HTTP client | 600–1100 | curl_cffi wrapper, TLS fingerprinting, proxy setup |
+| Stripe protocol | 1100–3000 | init / lookup / confirm / 3DS / poll |
+| ChatGPT auth | 3000–4500 | Session management, access_token refresh |
+| Camoufox | 4500–6000 | PayPal browser flow, second-login OAuth |
+| Exceptions + entrypoint | 6000–8000 | Exception classes, daemon hooks, CLI entry |
+
+#### `hcaptcha_auto_solver.py` (~4000 lines)
+
+Communicates with `card.py` **via subprocess, not import**. The ML dependencies (torch, CLIP, opencv) live in a separate venv (`~/.venvs/ctfml/`) isolated from the main program's venv.
+
+#### Other `CTF-pay/` files
+
+- **`hcaptcha_bridge_helper.py`**: CLI tool that connects to the hCaptcha bridge and lets you manually take screenshots, click, and submit — used for interactive debugging.
+- **`local_mock_gateway.py`**: Local HTTP mock server that simulates the Stripe state machine across three scenarios: `challenge_pass_then_decline`, `challenge_failed`, and `no_3ds_card_declined`.
+- **`retry_house_decline.py`**: Retry wrapper targeting "direct terminal decline" responses rather than challenge entries.
+
+### `CTF-reg/` — ChatGPT registration subsystem
+
+Invoked by `card.py::auto_register` to register a fresh ChatGPT account from scratch and return an `access_token`.
+
+| File | Role |
+|---|---|
+| `browser_register.py` | Primary registration path via Camoufox real browser; handles Cloudflare Turnstile |
+| `auth_flow.py` | Pure HTTP registration path; fallback with incomplete coverage |
+| `sentinel.py` | Generates OpenAI Sentinel PoW token (browser fingerprint simulation + SHA-3) |
+| `mail_provider.py` | IMAP catch-all client for retrieving registration and login OTPs |
+| `http_client.py` | HTTP client factory; prefers curl_cffi for TLS fingerprinting |
+| `config.py` | Dataclass config definitions |
+
+### `pipeline.py` — orchestrator
+
+Connects `CTF-reg/` and `CTF-pay/` and exposes four operating modes:
+
+| Mode | Entry function |
+|---|---|
+| Single run | `pipeline()` |
+| Parallel batch | `batch()` |
+| Self-dealing | `self_dealer()` |
+| Persistent daemon | `daemon()` |
+
+---
+
+## Protocol chain details
+
+### Stripe Checkout chain
+
+```
+init
+ → elements/sessions
+   → consumers/sessions/lookup
+     → address / tax_region updates
+       → confirm
+           (inline_payment_method_data or shared_payment_method mode)
+         → 3ds2/authenticate
+           → poll
+```
+
+<Warning>
+`setatt_` / `source` having values does not mean success — it only means you have a 3DS authenticate source. `state = challenge_required` with `ares.transStatus = C` means the browser must complete the challenge. Only after the browser finishes the challenge do the downstream `intent` / `setup_intent` states advance.
+</Warning>
+
+### PayPal billing agreement chain
+
+```
+B1: enter billing agreement page (Stripe redirect)
+ → B-DDC: device fingerprint collection (DataDome slider possible)
+   → B2: email + password login
+     → B3: agreement consent
+       → B6: hermes path
+         → B7: funding selection
+           → B8: redirect back to Stripe
+```
+
+The DataDome slider can appear at the B-DDC or B6 step. Daemon mode includes automatic slider solving.
+
+### Codex OAuth + PKCE second login
+
+After payment succeeds, a new Camoufox instance opens the Codex authorize URL:
+
+```
+GET https://auth.openai.com/oauth/authorize
+  ?client_id=YOUR_OPENAI_CODEX_CLIENT_ID
+  &redirect_uri=http://localhost:1455/auth/callback
+  &codex_cli_simplified_flow=true
+  &code_challenge=<PKCE>
+  &state=<random>
+```
+
+<Steps>
+  <Step title="Enter credentials">
+    Fill in email and password in the Camoufox browser instance.
+  </Step>
+  <Step title="Handle OTP (if required)">
+    The IMAP client polls for a login code email and submits the OTP.
+  </Step>
+  <Step title="Consent page">
+    Click **Continue** on the Codex consent page.
+  </Step>
+  <Step title="Intercept callback">
+    A Playwright route intercepts the `localhost:1455` callback and extracts the `code` parameter.
+  </Step>
+  <Step title="Exchange for token">
+    POST to `/oauth/token` with the `code_verifier` to receive the `refresh_token`.
+  </Step>
+</Steps>
+
+---
+
+## Core exception classes
+
+These exceptions are defined in `CTF-pay/card.py` lines 6000–8000:
+
+| Exception | Description |
+|---|---|
+| `CheckoutSessionInactive` | Stripe checkout session has expired (default TTL: 24 hours) |
+| `ChallengeReconfirmRequired` | hCaptcha token expired before confirm was submitted (TTL ~2 min) |
+| `FreshCheckoutAuthError` | ChatGPT-side credential or account problem blocked auth |
+| `DatadomeSliderError` | PayPal DataDome slider challenge solve failed |
+| `WebshareQuotaExhausted` | Webshare monthly proxy replacement quota exhausted |
+
+---
+
+## Data flow
+
+### `output/results.jsonl`
+
+Each pipeline result is written as one JSON line:
+
+```json
+{"ts": "2026-04-27T03:14:22Z",
+ "status": "succeeded",
+ "chatgpt_email": "abc123@your-domain.example",
+ "session_id": "cs_live_a1b2c3...",
+ "channel": "paypal",
+ "team_account_id": "38a7aff4-...-...",
+ "refresh_token": "rt_...",
+ "invite_permission": "ok",
+ "team_gpt_account_pk": 12345,
+ "email_domain": "your-domain.example",
+ "cpa_import": {"status": "ok", "account_id": "..."}}
+```
+
+### `output/registered_accounts.jsonl`
+
+<Warning>
+This file contains sensitive credentials — `password`, `access_token`, `session_token`, `device_id`, and cookies — for every successfully registered account. It is already excluded by `.gitignore`. Never share or commit this file.
+</Warning>
+
+### `output/daemon_state.json`
+
+Daemon mode state snapshot used to resume across restarts:
+
+```json
+{
+  "started_at": "2026-04-27T03:14:22Z",
+  "total_attempts": 761,
+  "total_succeeded": 472,
+  "total_failed": 289,
+  "consecutive_failures": 0,
+  "ip_no_perm_streak": 0,
+  "current_proxy_ip": "198.51.100.X",
+  "total_ip_rotations": 16,
+  "webshare_rotation_disabled": false,
+  "current_zone": "zone-a.example",
+  "zone_ip_rotations": 0,
+  "last_stats": { "total_active": 44, "usable": 38, "no_invite_permission": 5 }
+}
+```
+
+---
+
+## External system boundaries
+
+All boundaries are configurable in `config.*.json` and can be disabled or swapped.
+
+| System | Role | Required |
+|---|---|---|
+| **OpenAI** | Register and log in to ChatGPT; obtain OAuth `refresh_token` | Yes |
+| **Stripe** | Checkout session protocol chain | Yes |
+| **PayPal** | Payment settlement | Yes (unless using card-only payment) |
+| **Cloudflare** | Catch-all email subdomain; Turnstile at registration | Yes |
+| **Captcha platform** (createTask/getTaskResult compatible) | Passive captcha fallback | Optional — browser passive captcha takes priority; platform only used as fallback |
+| **Webshare** (or self-hosted proxy) | Egress IP | Yes |
+| **VLM endpoint** | hCaptcha visual solving | Optional — residential/quasi-residential IPs usually skip hCaptcha; falls back to CLIP if no VLM |
+| **gpt-team / CPA** | Push accounts to downstream management system | Optional |

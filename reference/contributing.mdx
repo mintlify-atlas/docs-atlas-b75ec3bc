@@ -1,0 +1,147 @@
+---
+title: 'Contributing to gpt-pp-team: Guidelines and Standards'
+description: 'Contribution priorities, mandatory evidence per PR type, workflow, code style, testing approach, security policy, data redaction rules, and community channels.'
+---
+
+gpt-pp-team is a research project where usefulness outweighs strict formalism. The guidelines below exist to make your PR mergeable — maintainers cannot manually reproduce your changes locally, so the evidence you provide is the entire basis for review.
+
+<Warning>
+**Evidence is mandatory, not optional.** PRs without required evidence are tagged `needs-info` and auto-closed after 14 days with no explanation.
+</Warning>
+
+---
+
+## Contribution priorities
+
+Listed roughly by impact:
+
+1. **New hCaptcha prompt type solvers.** If you encounter a prompt type the solver does not cover, add support. Integration requires three small functions plus a dispatcher registration — see the README for the pattern. If you have a public prompt-to-label dataset, mention it in the PR.
+2. **Protocol stage adaptations.** Stripe, PayPal, and OpenAI introduce breaking changes roughly every few weeks. After you patch and stabilize across several runs, submit a PR and add a changelog line to `pipeline.py`.
+3. **Daemon self-healing branches.** Only contribute failure modes you have actually encountered. Attach real failure logs. Include detection, recovery, and state flag cleanup.
+4. **Reverse-engineering notes.** If you reverse a new endpoint (new invite mechanism, new admin API surface), add it to the README research section. Follow the existing redaction conventions: RFC 5737 IPs, `*.example` domains.
+5. **Translations and documentation polish.** English translations of inline comments are accepted as long as they do not alter behavior.
+6. **`flows/` test fixtures.** Real captures cannot be shipped (they contain cookies and PII), but redacted fixtures or fixture-generation tooling are useful.
+
+---
+
+## PR evidence requirements
+
+Maintainers cannot reproduce your PR locally. Your evidence is what gets it merged.
+
+| PR type | Required evidence |
+|---|---|
+| **Solver PR** (new hCaptcha type) | `round_XX.json`, `checkcaptcha_pass_*.json`, pass-rate statistics, prompt text |
+| **Protocol adaptation PR** | Packet capture diff (before / after), full pipeline log through terminal state |
+| **Daemon self-healing PR** | Log at the moment of failure trigger, log of the first successful run after recovery, `daemon_state.json` field diff |
+| **Bug fix / new feature** | Reproduction command, pre-fix failure log, post-fix success log |
+
+---
+
+## Workflow
+
+<Steps>
+  <Step title="Open an issue first for larger changes">
+    Five lines of discussion can save 500 lines of a PR going in the wrong direction.
+  </Step>
+  <Step title="Branch from main">
+    Use the naming convention `feat/<thing>` or `fix/<thing>`.
+  </Step>
+  <Step title="Test with offline or mock mode">
+    Run `--offline-replay` or `--local-mock` before any live run. Save reproducible outputs under `CTF-pay/test_runs/`.
+  </Step>
+  <Step title="Gather and attach evidence">
+    Collect the evidence required for your PR type (see table above). Redact all sensitive values before attaching.
+  </Step>
+  <Step title="Redact the diff before staging">
+    `.gitignore` already excludes `output/`, `flows/`, `paypal_cf_persist/`, and runtime configs. Still run `git diff --cached` to confirm no real cookies, tokens, IPs, or email addresses are staged.
+  </Step>
+  <Step title="Open the PR">
+    PR title follows the same format as commit subjects. Description answers three questions: what changed, why, and how it was tested.
+  </Step>
+</Steps>
+
+---
+
+## Code style
+
+- **Indentation:** 4 spaces, no tabs.
+- **Functions and variables:** `snake_case`.
+- **Exceptions and dataclasses:** `PascalCase`.
+- **Config files:** Follow the `config.*.json` naming pattern. Add new flags inside existing JSON sections rather than creating new top-level sections. Document any user-visible flags in `README.md`.
+- **Logging:** Include enough context that `tail` on the log reveals the problem. Pattern: `[STAGE] something something detail=...`.
+- **Comments:** Chinese or English both acceptable. Prefer English for code likely to be read by non-Chinese-speaking contributors.
+
+<Note>
+No auto-formatter is configured. Match the surrounding style in whichever file you are editing.
+</Note>
+
+---
+
+## Testing
+
+There is no dedicated `tests/` suite. Validate changes with replay-based checks:
+
+```bash
+# Validate logic without external requests
+python CTF-pay/card.py auto --config CTF-pay/config.offline-replay.json --offline-replay
+
+# Exercise the local mock gateway
+python CTF-pay/card.py auto --config CTF-pay/config.local-mock.json --local-mock
+```
+
+Save reproducible outputs under `CTF-pay/test_runs/`. If you write new automated tests, use `pytest` with filenames matching `test_*.py` and keep fixtures small.
+
+---
+
+## What not to contribute
+
+- Reports that running the tool against a target got you banned. Bans are expected behavior — that is what the research studies.
+- Requests for help running the tool against unauthorized targets. These are closed immediately and may result in a ban.
+- Pure refactors with no added functionality. `card.py` is intentionally a single 8000-line file; splitting it makes diffs harder to follow without reducing incidental complexity.
+- New ML model dependencies without strong justification. The ML venv is already 4 GB.
+
+---
+
+## Security issues
+
+<Warning>
+Do not open public GitHub issues for security vulnerabilities in gpt-pp-team itself.
+</Warning>
+
+Report security issues (credential leaks, config loader injection, insecure deserialization, SSRF in helper scripts, etc.) privately through one of these channels:
+
+1. **GitHub private vulnerability report:** Repository → **Security → Report a vulnerability**
+2. **Maintainer email:** Find it via the repository owner's GitHub profile
+
+Include: affected file and line number, minimal reproduction steps, estimated impact, and whether you want attribution on the fix. Target response time is 7 days for first reply, 30 days for fix or mitigation.
+
+For vulnerabilities in **target services** (Stripe, PayPal, OpenAI, hCaptcha, Cloudflare, Webshare), report directly to those vendors through their own bug bounty programs — not here.
+
+---
+
+## Data sensitivity
+
+Configs may contain tokens, cookies, mail credentials, and proxy settings. Follow these rules before sharing anything:
+
+| Data type | Replacement to use |
+|---|---|
+| Real IP addresses | `203.0.113.x`, `198.51.100.x`, `192.0.2.x` (RFC 5737) |
+| Real domains | `*.example`, `*.example.com`, `*.test`, `*.invalid` |
+| Email addresses | `you@example.com`, `tester@example.com` |
+| Internal ASN / org names | `AS-XX`, `ISP-A` |
+| ChatGPT account IDs, tokens, cookies | Never share — not even truncated |
+| Account counts and timestamps | Keep real — that is the research value |
+
+---
+
+## Community channels
+
+| Channel | Purpose |
+|---|---|
+| [**LINUX DO**](https://linux.do/) | Primary technical discussion, protocol research feedback, and long-form records |
+| **QQ group `1028722105`** | Real-time discussion (Chinese-language) |
+| **GitHub Issues / Discussions** | Bug reports, feature requests, public Q&A |
+
+<Note>
+There is no chat server, no Discord, and no mailing list. Use GitHub Issues or Discussions for questions.
+</Note>

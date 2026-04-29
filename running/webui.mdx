@@ -1,0 +1,121 @@
+---
+title: 'Web UI: Configuration Wizard and Preflight Self-Check'
+description: 'A 14-step browser-based wizard that produces ready-to-run config files for pipeline.py, with real-time SSE log streaming and per-step preflight validation.'
+---
+
+The web UI compresses what otherwise takes 1–3 hours of manual config editing into roughly 15 minutes. It guides you through every required setting, validates credentials in real time, and writes the two config files that `pipeline.py` needs.
+
+---
+
+## Installation and startup
+
+<Steps>
+  <Step title="Install backend dependencies">
+    ```bash
+    pip install -r webui/requirements.txt
+    ```
+  </Step>
+  <Step title="Build the frontend (once)">
+    ```bash
+    cd webui/frontend && pnpm i && pnpm build && cd ../..
+    ```
+  </Step>
+  <Step title="Start the server">
+    ```bash
+    python -m webui.server
+    ```
+    The server binds to `127.0.0.1:8765` by default.
+  </Step>
+  <Step title="Open the wizard">
+    Navigate to `http://127.0.0.1:8765` in your browser. On the first visit the server redirects you to `/setup` to create the admin account. After that, every visit goes directly to the wizard.
+  </Step>
+</Steps>
+
+---
+
+## 14-step wizard
+
+The wizard is organized into five phases. Each step has a right-hand `PreflightPanel` that runs live checks and turns green as each setting passes validation — you see problems immediately rather than at pipeline run time.
+
+| Phase | Steps |
+|---|---|
+| **1 — Basics (5 steps)** | Mode selection / System dependencies / Cloudflare / IMAP / Proxy |
+| **2 — Payment (2 steps)** | PayPal / Card + Billing |
+| **3 — CAPTCHA (2 steps, optional)** | Solving platform / VLM endpoint |
+| **4 — Downstream (4 steps)** | Team plan / gpt-team / CPA / Daemon / Stripe runtime |
+| **5 — Finish (1 step)** | Review + export |
+
+When you complete all 14 steps the wizard writes two config files:
+
+- `CTF-pay/config.auto.json` — used by `pipeline.py --config` and `card.py`
+- `CTF-reg/config.paypal-proxy.json` — used by `pipeline.py --register-only`
+
+Both Plus and Team subscription paths are supported. The mode selection step in Phase 1 adjusts which downstream steps are active.
+
+---
+
+## Preflight self-check
+
+Every step surfaces a `PreflightPanel` on the right side of the screen. As you fill in a field the panel immediately fires the relevant check — Cloudflare API key validity, IMAP login, proxy reachability, Webshare quota, CPA server connectivity — and marks it passed or failed. You can proceed to the next step only after all required checks pass.
+
+<Tip>
+Run the preflight checks in order. A failed proxy check in Phase 1 will cause downstream checks (PayPal browser flow, Cloudflare subdomain provisioning) to fail for unrelated-looking reasons.
+</Tip>
+
+---
+
+## Real-time log streaming
+
+After the wizard produces config files you can trigger a pipeline run directly from the UI. Log output streams to the browser over SSE (Server-Sent Events) so you can watch the register → pay → OAuth chain in real time without SSHing into the host.
+
+You must be logged in as the admin account (created at the `/setup` step) to start a run or view logs.
+
+---
+
+## Nginx reverse proxy for public access
+
+By default the server only listens on `127.0.0.1`. To access the UI from another machine, put nginx in front of it:
+
+```nginx
+location /webui/ {
+    proxy_pass http://127.0.0.1:8765/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+}
+```
+
+<Warning>
+Do not expose the web UI to the public internet without authentication. The wizard stores PayPal credentials, proxy passwords, and OAuth tokens in the config files it writes. Restrict access with network-level controls or add a strong admin password at the `/setup` step.
+</Warning>
+
+---
+
+## Development mode
+
+<CodeGroup>
+
+```bash Backend (auto-reload)
+uvicorn webui.server:create_app --factory --reload --host 127.0.0.1 --port 8765
+```
+
+```bash Frontend (Vite proxy → port 8765)
+cd webui/frontend && pnpm dev
+# Open http://127.0.0.1:5173
+```
+
+```bash Run backend tests
+python -m pytest webui/tests/ -v
+```
+
+```bash Run frontend tests
+cd webui/frontend && pnpm test
+```
+
+</CodeGroup>
+
+The Vite dev server proxies all `/api` requests to port 8765 automatically, so the frontend and backend can be developed independently without rebuilding the static assets on every change.
+
+

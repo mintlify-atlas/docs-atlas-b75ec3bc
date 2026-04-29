@@ -1,0 +1,103 @@
+---
+title: 'ChatGPT Team Anti-Fraud Model: Two-Layer Architecture'
+description: 'Corrected two-layer fraud model from experimental data: five refuted assumptions, probe vs. ban layer mechanics, and four key insights for cohort survival.'
+---
+
+The experiments refuted several assumptions that appeared reasonable before data collection. This page presents the corrected model, explains what the data actually shows, and provides guidance for reproducing the experiments yourself.
+
+## Refuted early assumptions
+
+| Early assumption | Data observed | Verdict |
+|---|---|---|
+| Anti-fraud granularity is the registration email domain | Five clean subdomains cleared on the same day | ❌ It is batch correlation, not domain-level |
+| `*.zone-a.example` subdomains are stable | All five domain batches cleared on the same day | ❌ These domains' accounts were batch-banned together; they appeared `ok` only before the audit ran |
+| Same IP + same PayPal + dense registration won't trigger anti-fraud (12 consecutive `probe=ok`) | 24-hour survival ≈ 2% | ❌ `probe=ok` is only an instantaneous state |
+| 30+ registrations in one day won't trigger a new burn | 45 accounts batch-banned | ❌ It does — with a ~12-hour delay |
+| `probe=no_perm` is a domain-level flag | Same domain returned opposite results from different IPs | ❌ The dominant signal is the egress IP |
+
+## Corrected two-layer model
+
+### Probe layer
+
+- **Signal:** `(egress_ip_string, email_domain_string?)`
+- **Evaluation:** at request time, synchronous
+- **IP lifetime:** ~4–5 registrations before `no_perm`
+- **Domain-level flagging:** rare, applies to a small set of permanently flagged domains (e.g., `zone-c.example`)
+
+### Ban layer
+
+- **Signal:** `(time_window, payment_account, egress_ip, fingerprint)`
+- **Evaluation:** scheduled cron at approximately `00:00 UTC` and `12:00 UTC`
+- **Mechanism:** batch correlation across shared dimensions → batch ban of the entire cohort
+
+### Architecture diagram
+
+```text
+┌─────────────────────────────────────────────────────┐
+│                Probe layer (immediate)               │
+│                                                      │
+│  signal = (egress_ip_string, email_domain_string?)   │
+│  evaluation = at request time                        │
+│  IP lifetime = ~4-5 registrations                    │
+│  domain-level flagging = rare permanent cases        │
+└─────────────────────────────────────────────────────┘
+                       ↓
+                 registration may be ok
+                       ↓
+┌─────────────────────────────────────────────────────┐
+│                Ban layer (delayed batch)             │
+│                                                      │
+│  signal = (time_window, payment_account,             │
+│            egress_ip, fingerprint, ...)              │
+│  evaluation = scheduled cron @ ~00:00 / 12:00 UTC   │
+│  batch correlation → batch ban                       │
+└─────────────────────────────────────────────────────┘
+                       ↓
+              ~95% extinction by next morning
+```
+
+## Key insights
+
+1. **`probe=ok` does not mean the account is stable.** It only means the cohort has not been audited yet. The ban layer runs hours later and evaluates the cohort as a whole.
+
+2. **Domain-level flagging is a minority case.** Only a small number of domains (like `zone-c.example`) are permanently flagged at the domain level. Most `no_perm` results are IP-driven, not domain-driven.
+
+3. **The egress IP string is the dominant probe-layer signal.** The same domain returns different probe results depending on which IP originates the request. ASN, city, and ISP are irrelevant — only the exact IP string matters.
+
+4. **Batch correlation is the dominant ban-layer signal.** When accounts in a cohort share payment account, egress IP, and fingerprint within a narrow time window, the cron job removes the entire cohort. Reducing shared dimensions is the only way to meaningfully improve survival.
+
+## How to reproduce these experiments
+
+<Steps>
+  <Step title="Prepare two proxies with different ASNs">
+    You need at least two egress IPs from different ASNs. Using two slots from the same provider on the same ASN is insufficient — the experiment requires genuinely different network paths.
+  </Step>
+  <Step title="Run the daemon for at least one week">
+    Configure daemon mode and let it run. A minimum of one week gives you enough ban events across multiple cron windows to identify the pattern reliably.
+  </Step>
+  <Step title="Query the gpt_accounts table daily">
+    Use sqlite3 to check `is_banned` status changes each day. Track `created_at` and `updated_at` to correlate ban timing with the cron windows.
+  </Step>
+  <Step title="Run the ban pattern analysis query">
+    ```sql
+    -- Batch characteristics of accounts banned within 24h
+    SELECT
+        DATE(created_at) AS create_day,
+        HOUR(updated_at) AS ban_hour,
+        proxy_ip,
+        payment_account,
+        COUNT(*) AS cnt
+    FROM gpt_accounts
+    WHERE is_banned = 1
+      AND updated_at > created_at + INTERVAL '12 hours'
+    GROUP BY 1, 2, 3, 4
+    ORDER BY 1 DESC, 2 DESC;
+    ```
+  </Step>
+  <Step title="Set up control groups by dimension">
+    Compare: same PayPal vs. different PayPal accounts, same egress IP vs. different egress IPs. Hold all other variables constant to isolate each dimension's contribution to survival rate.
+  </Step>
+  <Step title="Sanitize before sharing">
+    Replace real IPs with RFC 5737 addresses (`203.0.113.0/24`, `198.51.100.0/24`, `192.0.2.0/24`) and real domains with `*.example` equivalents. Account counts and timestamps do not need modification — they are the research values.
+  </Step>
+</Steps>

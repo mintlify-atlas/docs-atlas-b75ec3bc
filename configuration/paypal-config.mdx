@@ -1,0 +1,302 @@
+---
+title: 'PayPal Config Reference: CTF-pay/config.paypal.json'
+description: 'Complete field-by-field reference for the main CTF-pay config file, covering daemon, Webshare proxies, CPA integration, and the browser challenge solver.'
+---
+
+`CTF-pay/config.paypal.json` is the primary configuration file for the payment side of the pipeline. Both single-run and daemon modes read this file. Create it by copying the example template:
+
+```bash
+cp CTF-pay/config.paypal.example.json CTF-pay/config.paypal.json
+```
+
+<Warning>
+  This file contains PayPal credentials, IMAP auth codes, and API keys. Never commit it — it is already listed in `.gitignore`.
+</Warning>
+
+---
+
+## `team_system`
+
+Controls whether completed accounts are pushed downstream to a gpt-team instance. Set `enabled` to `false` if you are not running a downstream team system.
+
+<CodeGroup>
+
+```json config.paypal.json
+"team_system": {
+  "enabled": false,
+  "base_url": "http://127.0.0.1:3000",
+  "username": "admin",
+  "password": "YOUR_TEAM_SYSTEM_PASSWORD",
+  "timeout_s": 60,
+  "domain_cooldown_hours": 24
+}
+```
+
+</CodeGroup>
+
+<ParamField body="enabled" type="boolean" default="false">
+  When `true`, the pipeline pushes each newly created account to the gpt-team backend after checkout succeeds. Set to `false` to skip downstream delivery entirely.
+</ParamField>
+
+<ParamField body="base_url" type="string" default="http://127.0.0.1:3000">
+  Base URL of the gpt-team backend API.
+</ParamField>
+
+<ParamField body="username" type="string" required>
+  Admin username used to authenticate with the gpt-team backend.
+</ParamField>
+
+<ParamField body="password" type="string" required>
+  Admin password for the gpt-team backend.
+</ParamField>
+
+<ParamField body="timeout_s" type="number" default="60">
+  HTTP request timeout in seconds when calling the downstream gpt-team API.
+</ParamField>
+
+<ParamField body="domain_cooldown_hours" type="number" default="24">
+  How long (in hours) to wait before retrying a domain that returned `invite=no_permission`.
+</ParamField>
+
+---
+
+## `daemon`
+
+Tuning parameters for continuous daemon mode. The daemon polls account pool capacity and runs the pipeline automatically when the pool falls below the target.
+
+<CodeGroup>
+
+```json config.paypal.json
+"daemon": {
+  "target_ok_accounts": 20,
+  "usage_pool": "recovery",
+  "poll_interval_s": 600,
+  "rate_limit": {
+    "per_hour": 0,
+    "per_day": 0
+  },
+  "max_consecutive_failures": 5,
+  "consecutive_fail_cooldown_s": 1800,
+  "jitter_before_run_s": [60, 180],
+  "seat_limit": 5
+}
+```
+
+</CodeGroup>
+
+<ParamField body="target_ok_accounts" type="number" default="20">
+  The pool size the daemon tries to maintain. When the number of healthy accounts drops below this value, the daemon triggers a new pipeline run.
+</ParamField>
+
+<ParamField body="usage_pool" type="string" default="recovery">
+  Identifies which account pool the daemon monitors. Maps to a pool name in the gpt-team database.
+</ParamField>
+
+<ParamField body="poll_interval_s" type="number" default="600">
+  How often (in seconds) the daemon checks the current pool capacity.
+</ParamField>
+
+<ParamField body="rate_limit.per_hour" type="number" default="0">
+  Maximum pipeline runs allowed per hour. `0` means unlimited.
+</ParamField>
+
+<ParamField body="rate_limit.per_day" type="number" default="0">
+  Maximum pipeline runs allowed per day. `0` means unlimited.
+</ParamField>
+
+<ParamField body="max_consecutive_failures" type="number" default="5">
+  After this many consecutive failures the daemon enters a cooldown period instead of retrying immediately.
+</ParamField>
+
+<ParamField body="consecutive_fail_cooldown_s" type="number" default="1800">
+  Duration in seconds of the cooldown after `max_consecutive_failures` is reached.
+</ParamField>
+
+<ParamField body="jitter_before_run_s" type="number[]" default="[60, 180]">
+  A `[min, max]` range in seconds. The daemon waits a random duration in this range before each pipeline run to avoid predictable timing patterns.
+</ParamField>
+
+<ParamField body="seat_limit" type="number" default="5">
+  Maximum number of invite seats per team when operating in self-dealer mode.
+</ParamField>
+
+<ParamField body="gpt_team_db_path" type="string">
+  Absolute path to the gpt-team SQLite database (`database.sqlite`). Required only when `cf_cleanup_every_n_runs` is set to a non-zero value.
+</ParamField>
+
+<ParamField body="cf_cleanup_every_n_runs" type="number" default="30">
+  How often (measured in pipeline run counts) the daemon removes dead Cloudflare DNS subdomains. Set to `0` to disable cleanup.
+</ParamField>
+
+---
+
+## `webshare`
+
+Integration with the [Webshare](https://webshare.io) proxy API for automatic IP rotation. When enabled, the daemon rotates residential proxies on `no_invite_permission` errors.
+
+<CodeGroup>
+
+```json config.paypal.json
+"webshare": {
+  "enabled": true,
+  "api_key": "YOUR_WEBSHARE_API_KEY",
+  "refresh_threshold": 2,
+  "no_rotation_cooldown_s": 10800,
+  "lock_country": "US",
+  "zone_rotate_after_ip_rotations": 2,
+  "gost_listen_port": 18898,
+  "sync_team_proxy": true
+}
+```
+
+</CodeGroup>
+
+<ParamField body="enabled" type="boolean" default="false">
+  Enable Webshare-managed proxy rotation. When `false`, the static `proxies` list is used instead.
+</ParamField>
+
+<ParamField body="api_key" type="string" required>
+  Your Webshare API key, found in the Webshare dashboard under API settings.
+</ParamField>
+
+<ParamField body="refresh_threshold" type="number" default="2">
+  Number of consecutive `no_invite_permission` responses that triggers an IP rotation.
+</ParamField>
+
+<ParamField body="no_rotation_cooldown_s" type="number" default="10800">
+  Cooldown in seconds after Webshare rotation quota is exhausted before the next rotation attempt.
+</ParamField>
+
+<ParamField body="lock_country" type="string" default="US">
+  Restrict Webshare proxy selection to a specific country code. `US` proxies tend to be the most reliable for this pipeline.
+</ParamField>
+
+<ParamField body="zone_rotate_after_ip_rotations" type="number" default="2">
+  After this many IP rotations within a single zone, the daemon switches to the next zone.
+</ParamField>
+
+<ParamField body="gost_listen_port" type="number" default="18898">
+  Local port the `gost` relay process listens on. The `proxies` list should point to `socks5://127.0.0.1:<this port>`.
+</ParamField>
+
+<ParamField body="sync_team_proxy" type="boolean" default="true">
+  When `true`, the daemon updates the global proxy setting in gpt-team after each IP rotation so downstream traffic also routes through the new IP.
+</ParamField>
+
+---
+
+## `cpa`
+
+Optional integration for pushing credentials to a CPA (Codex Proxy Auth) server after account creation.
+
+<CodeGroup>
+
+```json config.paypal.json
+"cpa": {
+  "enabled": true,
+  "base_url": "https://your-cpa-host/api",
+  "admin_key": "YOUR_CPA_ADMIN_KEY",
+  "oauth_client_id": "YOUR_OPENAI_CODEX_CLIENT_ID",
+  "plan_tag": "team",
+  "timeout_s": 20
+}
+```
+
+</CodeGroup>
+
+<ParamField body="enabled" type="boolean" default="false">
+  When `true`, the pipeline delivers each new account to the CPA server after payment completes.
+</ParamField>
+
+<ParamField body="base_url" type="string" required>
+  Base URL of the CPA server API (include the `/api` path prefix if applicable).
+</ParamField>
+
+<ParamField body="admin_key" type="string" required>
+  Admin API key for authenticating with the CPA server.
+</ParamField>
+
+<ParamField body="oauth_client_id" type="string" required>
+  The OAuth `client_id` used by Codex CLI. You can find the current value in the Codex CLI source code.
+</ParamField>
+
+<ParamField body="plan_tag" type="string" default="team">
+  Tag applied to accounts delivered to the CPA server to identify the subscription plan.
+</ParamField>
+
+<ParamField body="timeout_s" type="number" default="20">
+  HTTP request timeout in seconds when calling the CPA server.
+</ParamField>
+
+---
+
+## `proxies`
+
+Static proxy pool used when `webshare.enabled` is `false`. You can supply one or more SOCKS5 or HTTP proxies.
+
+<CodeGroup>
+
+```json config.paypal.json
+"proxies": {
+  "enabled": true,
+  "rotation": "random",
+  "list": ["socks5://127.0.0.1:18898"]
+}
+```
+
+</CodeGroup>
+
+<ParamField body="enabled" type="boolean" default="false">
+  Enable proxy usage. When `false`, requests go out through the host's default network interface.
+</ParamField>
+
+<ParamField body="rotation" type="string" default="random">
+  Strategy for selecting a proxy from `list` on each request:
+  - `random` — pick a proxy at random.
+  - `static` — always use the first proxy in the list.
+  - `lru` — rotate in least-recently-used order.
+</ParamField>
+
+<ParamField body="list" type="string[]">
+  One or more proxy URIs. Supports `socks5://`, `socks4://`, and `http://` schemes. Example: `["socks5://USER:PASS@host:1080"]`.
+</ParamField>
+
+---
+
+## `browser_challenge`
+
+Settings for the browser-based hCaptcha challenge flow. The `external_solver` sub-object configures the VLM-powered automated solver.
+
+<CodeGroup>
+
+```json config.paypal.json
+"browser_challenge": {
+  "enabled": true,
+  "auto_launch_browser": false,
+  "headless": false,
+  "timeout_ms": 1800000,
+  "auto_click_checkbox": true
+}
+```
+
+</CodeGroup>
+
+<ParamField body="enabled" type="boolean" default="true">
+  When `true`, the pipeline uses a real browser to handle challenges that cannot be solved headlessly.
+</ParamField>
+
+<ParamField body="auto_launch_browser" type="boolean" default="false">
+  Automatically launch a browser window when a challenge is encountered, without requiring manual intervention.
+</ParamField>
+
+<ParamField body="headless" type="boolean" default="false">
+  Run the browser in headless mode. Disable this (set to `false`) when you need to observe or interact with the browser window.
+</ParamField>
+
+<ParamField body="timeout_ms" type="number" default="1800000">
+  Maximum time in milliseconds to wait for the browser challenge to be solved before the pipeline aborts.
+</ParamField>
+
+<ParamField body="auto_click_checkbox" type="boolean" default="true">
+  Automatically click the hCaptcha checkbox before the image challenge appears.
+</ParamField>

@@ -1,0 +1,155 @@
+---
+title: 'Extending the hCaptcha Solver with New Challenge Types'
+description: 'How to write a prompt matcher, a solver function returning a SolverResult, and wire it into the solve_bridge() dispatcher to cover new hCaptcha challenge types.'
+---
+
+The solver currently covers 12 known hCaptcha challenge types. When it encounters a prompt it does not recognize and the VLM is unavailable, it raises `unknown_prompt`. The cleanest way to extend coverage is to write a three-part addition: a prompt matcher, a solver function, and a dispatcher branch.
+
+<Note>Before writing a new solver, collect 100–500 screenshots of the target challenge type from past daemon runs. The `round_XX.png` files in your `--out-dir` are the right source. More examples make it easier to tune CLIP thresholds and verify your solver before opening a PR.</Note>
+
+## The `SolverResult` type
+
+Every solver function must return a `SolverResult`. The fields you need to populate depend on whether the challenge is a click type or a drag type.
+
+```python
+@dataclass
+class SolverResult:
+    action: str                                        # "click" or "drag"
+    candidate_click_sets: list[list[int]] | None = None  # click only
+    drag_variations: list[...] | None = None           # drag only
+```
+
+- **`action`** — `"click"` for tile-selection challenges, `"drag"` for object-placement challenges.
+- **`candidate_click_sets`** — an ordered list of tile-index sets, sorted from highest to lowest CLIP confidence. The retry loop tries each set in order. A typical layout is: strong set (confidence ≥ 0.5), medium set (confidence ≥ 0.3), then individual tiles.
+- **`drag_variations`** — produced by `build_drag_start_variations()` × `build_drag_target_variations()`, yielding up to 25 jitter combinations.
+
+## Adding a new challenge type
+
+<Steps>
+  <Step title="Write a prompt matcher function">
+    The matcher receives the raw prompt string (lowercased is fine) and returns `True` when it matches your new type. Keep it narrow — a false positive will route the wrong challenge to your solver.
+
+    ```python
+    def is_carry_things_prompt(prompt: str) -> bool:
+        p = prompt.lower()
+        return "carry" in p and "things" in p
+    ```
+
+    <Tip>Use `in` checks rather than regexes for simple keyword matching. Reserve regex for prompts with variable phrasing where keyword order matters.</Tip>
+  </Step>
+
+  <Step title="Write the solver function">
+    The solver receives the challenge image as a NumPy array and the prompt string. It returns a `SolverResult` populated with `candidate_click_sets` (for click challenges) or `drag_variations` (for drag challenges).
+
+    ```python
+    def solve_carry_things(image: np.ndarray, prompt: str, **kw) -> SolverResult:
+        # Use CLIP, OpenCV, or any other method to score candidates.
+        # candidate_click_sets must be ordered: strongest first.
+        return SolverResult(
+            action="click",
+            candidate_click_sets=[
+                [tile_idx_1, tile_idx_2],   # strong set  (confidence >= 0.5)
+                [tile_idx_1],                # fallback set (confidence >= 0.3)
+            ],
+        )
+    ```
+
+    The variation retry system in the executor will iterate through `candidate_click_sets` automatically — you do not need to implement retry logic inside the solver itself.
+
+    For drag challenges, populate `drag_variations` using the existing helpers:
+
+    ```python
+    def solve_carry_things_drag(image: np.ndarray, prompt: str, **kw) -> SolverResult:
+        source_center = _locate_source_object(image)
+        target_center = _locate_target_slot(image)
+
+        return SolverResult(
+            action="drag",
+            drag_variations=(
+                build_drag_start_variations(source_center)
+                * build_drag_target_variations(target_center)
+            ),
+        )
+    ```
+  </Step>
+
+  <Step title="Add a branch in the solve_bridge() dispatcher">
+    Open `solve_bridge()` and add an `elif` branch. Place it before the `unknown_prompt` fallback at the bottom of the chain.
+
+    ```python
+    elif is_carry_things_prompt(prompt):
+        result = solve_carry_things(image, prompt, **kw)
+    ```
+
+    The full dispatch chain follows the pattern:
+
+    ```python
+    if is_water_travel_prompt(prompt):
+        result = solve_water_travel(image, prompt, **kw)
+    elif is_pair_drag_prompt(prompt):
+        result = solve_pair_drag(image, prompt, **kw)
+    # ... existing types ...
+    elif is_carry_things_prompt(prompt):
+        result = solve_carry_things(image, prompt, **kw)
+    else:
+        raise unknown_prompt(prompt)
+    ```
+  </Step>
+</Steps>
+
+## How the variation retry system interacts with your solver
+
+Once your solver returns a `SolverResult`, the executor drives the retry loop without further involvement from your code:
+
+1. The executor picks the first `candidate_click_sets` entry and submits it.
+2. It checks the visual feedback metrics (`changed_pixels`, `mean_diff`) to confirm the click landed.
+3. If the click did not land, it applies ±10 px / ±16 px offset retries (up to 9 attempts).
+4. If the challenge is not solved (detected via `/checkcaptcha`), the executor advances to the next candidate set.
+5. When all sets are exhausted, it raises `click_set_variations_exhausted`, which `card.py` catches to re-queue the round.
+
+Image hash deduplication ensures that the same set is never retried on an identical challenge image:
+
+```python
+key = (prompt_text, hashlib.sha1(image_bytes).hexdigest())
+exhausted_variations[key].add(variation_id)
+```
+
+## Unknown prompt fallback behavior
+
+When the dispatcher reaches the `else` branch (no matcher returned `True`), behavior depends on whether the VLM is enabled:
+
+- **VLM enabled:** the solver still attempts direct coordinate mode — the VLM looks at the raw screenshot and returns normalized `[x, y]` coordinates. This often works for novel challenge types that have a visually obvious answer.
+- **VLM fails or disabled:** `unknown_prompt` is raised. The debug artifacts (`round_XX.png`, `round_XX.json`) are written to `--out-dir` for post-mortem analysis.
+
+```python
+class unknown_prompt(Exception): pass
+```
+
+Use the saved artifacts as the starting point for writing your matcher and solver.
+
+## Collecting training data
+
+You need representative screenshots before you can tune CLIP thresholds or verify solver output. Collect them from past daemon runs:
+
+```bash
+# List all round screenshots in the live output directory
+ls /tmp/hcaptcha_auto_solver_live/round_*.png
+
+# Filter to a specific prompt type using the round JSON metadata
+grep -l "carry" /tmp/hcaptcha_auto_solver_live/round_*.json
+```
+
+Aim for 100–500 images per challenge type. A sample of fewer than 100 makes it hard to distinguish CLIP confidence thresholds from noise.
+
+<Tip>Sort your screenshots by the `checkcaptcha_pass` / `checkcaptcha_fail` files to build a labeled dataset. Pass rounds tell you which tile indices were correct; fail rounds show you what the solver got wrong.</Tip>
+
+## PR guidelines for new challenge types
+
+When you open a pull request adding a new solver, include:
+
+- **Round JSON evidence** — at least 5 `round_XX.json` files showing the new prompt text and the expected answer. Redact any PII or live credentials before attaching.
+- **Pass/fail snapshot** — at least one `checkcaptcha_pass_*.json` confirming the solver works end-to-end.
+- **CLIP threshold justification** — a short note explaining how you chose the confidence thresholds for the strong and medium sets.
+- **Verification command** — the exact `hcaptcha_auto_solver.py` invocation you used to test, including `--headed` and `--no-vlm` flags if applicable.
+
+See [Contributing](/reference/contributing) for general contribution guidelines.

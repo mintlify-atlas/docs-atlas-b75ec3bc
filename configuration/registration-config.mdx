@@ -1,0 +1,297 @@
+---
+title: 'Registration Config: CTF-reg/config.paypal-proxy.json'
+description: 'Field-by-field reference for CTF-reg registration config: IMAP mail, auto-provisioning, card, billing, team plan, captcha platform, and proxy settings.'
+---
+
+`CTF-reg/config.paypal-proxy.json` drives the account registration flow — IMAP email verification, payment card details, billing address, team plan setup, captcha solving, and proxy routing. Create it from the example template:
+
+```bash
+cp CTF-reg/config.paypal-proxy.example.json CTF-reg/config.paypal-proxy.json
+```
+
+<Warning>
+  This file contains card numbers, IMAP credentials, and proxy passwords. Never commit it — it is already listed in `.gitignore`.
+</Warning>
+
+---
+
+## `mail`
+
+IMAP connection settings and the catch-all domain used to generate unique registration email addresses.
+
+<CodeGroup>
+
+```json config.paypal-proxy.json
+"mail": {
+  "imap_server": "imap.example.com",
+  "imap_port": 993,
+  "smtp_server": "smtp.example.com",
+  "smtp_port": 465,
+  "email": "you@example.com",
+  "auth_code": "YOUR_IMAP_AUTH_CODE",
+  "catch_all_domain": "subdomain.example.com",
+  "catch_all_domains": ["subdomain.example.com"],
+  "auto_provision": {
+    "enabled": false,
+    "zone_name": "example.com",
+    "min_available": 3,
+    "min_segs": 1,
+    "max_segs": 4,
+    "min_seg_len": 2,
+    "max_seg_len": 5,
+    "dns_propagation_s": 20
+  }
+}
+```
+
+</CodeGroup>
+
+<ParamField body="imap_server" type="string" required>
+  Hostname of your IMAP server (e.g. `imap.gmail.com`, `imap.qq.com`).
+</ParamField>
+
+<ParamField body="imap_port" type="number" default="993">
+  IMAP port. Use `993` for TLS (recommended) or `143` for STARTTLS.
+</ParamField>
+
+<ParamField body="smtp_server" type="string">
+  Hostname of your SMTP server. Required only if the pipeline needs to send mail (e.g. for forwarding or verification flows).
+</ParamField>
+
+<ParamField body="smtp_port" type="number" default="465">
+  SMTP port. Use `465` for SSL or `587` for STARTTLS.
+</ParamField>
+
+<ParamField body="email" type="string" required>
+  The primary mailbox address used to receive verification emails during registration.
+</ParamField>
+
+<ParamField body="auth_code" type="string" required>
+  The IMAP app password or auth token for this mailbox. For Gmail this is a 16-character app password; for QQ Mail it is the authorization code shown in account settings.
+</ParamField>
+
+<ParamField body="catch_all_domain" type="string" required>
+  A domain (or subdomain) configured with a DNS catch-all MX record that delivers all incoming mail to the mailbox above — for example `subdomain.example.com`. The pipeline generates a unique `anything@subdomain.example.com` address for each new account without creating real mailboxes.
+</ParamField>
+
+<ParamField body="catch_all_domains" type="string[]">
+  Additional catch-all domains to draw from when generating registration addresses. The pipeline cycles through this list alongside `catch_all_domain`.
+</ParamField>
+
+### `mail.auto_provision`
+
+When your catch-all domain pool runs low, `auto_provision` automatically creates new subdomains in a Cloudflare DNS zone so the pipeline never stalls waiting for fresh addresses.
+
+<Note>
+  A catch-all domain is a DNS record that routes all mail addressed to `*@yourdomain.com` to a single inbox. You set one up by adding a wildcard MX record in your DNS provider. `auto_provision` handles creating new subdomain entries in Cloudflare automatically.
+</Note>
+
+<ParamField body="auto_provision.enabled" type="boolean" default="false">
+  Enable automatic subdomain provisioning when the available address pool drops below `min_available`.
+</ParamField>
+
+<ParamField body="auto_provision.zone_name" type="string">
+  The Cloudflare DNS zone in which new subdomains are created (e.g. `example.com`). New catch-all subdomains are added as records under this zone. Use the pipeline's multi-zone daemon config (`zone_names` list) to rotate across several zones.
+</ParamField>
+
+<ParamField body="auto_provision.min_available" type="number" default="3">
+  Minimum number of usable catch-all subdomains to keep in reserve. When the pool falls below this value, new subdomains are provisioned automatically.
+</ParamField>
+
+<ParamField body="auto_provision.min_segs" type="number" default="1">
+  Minimum number of label segments in a generated subdomain. For example, `aaa.example.com` has 1 segment; `aaa.bbb.example.com` has 2.
+</ParamField>
+
+<ParamField body="auto_provision.max_segs" type="number" default="4">
+  Maximum number of label segments in a generated subdomain.
+</ParamField>
+
+<ParamField body="auto_provision.min_seg_len" type="number" default="2">
+  Minimum character length of each label segment.
+</ParamField>
+
+<ParamField body="auto_provision.max_seg_len" type="number" default="5">
+  Maximum character length of each label segment.
+</ParamField>
+
+<ParamField body="auto_provision.dns_propagation_s" type="number" default="20">
+  Seconds to wait after creating a new subdomain record before using it, allowing DNS changes to propagate.
+</ParamField>
+
+---
+
+## `card`
+
+Payment card used during the checkout step of registration.
+
+<CodeGroup>
+
+```json config.paypal-proxy.json
+"card": {
+  "number": "4242424242424242",
+  "cvc": "123",
+  "exp_month": "12",
+  "exp_year": "2030"
+}
+```
+
+</CodeGroup>
+
+<ParamField body="number" type="string" required>
+  16-digit card number (no spaces or dashes).
+</ParamField>
+
+<ParamField body="cvc" type="string" required>
+  Card security code (3 or 4 digits).
+</ParamField>
+
+<ParamField body="exp_month" type="string" required>
+  Two-digit expiry month, e.g. `"12"`.
+</ParamField>
+
+<ParamField body="exp_year" type="string" required>
+  Four-digit expiry year, e.g. `"2030"`.
+</ParamField>
+
+---
+
+## `billing`
+
+Billing address submitted with the payment card.
+
+<CodeGroup>
+
+```json config.paypal-proxy.json
+"billing": {
+  "name": "JOHN DOE",
+  "email": "",
+  "country": "US",
+  "currency": "USD",
+  "address_line1": "1 Example Street",
+  "address_state": "CA",
+  "postal_code": "94105",
+  "address_city": "San Francisco",
+  "address_line2": ""
+}
+```
+
+</CodeGroup>
+
+<ParamField body="name" type="string" required>
+  Cardholder name as it appears on the card.
+</ParamField>
+
+<ParamField body="email" type="string">
+  Billing contact email. Leave empty to use the registration address.
+</ParamField>
+
+<ParamField body="country" type="string" default="US">
+  ISO 3166-1 alpha-2 country code for the billing address.
+</ParamField>
+
+<ParamField body="currency" type="string" default="USD">
+  ISO 4217 currency code for the transaction.
+</ParamField>
+
+<ParamField body="address_line1" type="string" required>
+  First line of the billing street address.
+</ParamField>
+
+<ParamField body="address_line2" type="string">
+  Second line of the billing address (apartment, suite, etc.). Can be left empty.
+</ParamField>
+
+<ParamField body="address_city" type="string" required>
+  Billing city.
+</ParamField>
+
+<ParamField body="address_state" type="string" required>
+  State or province code, e.g. `"CA"`.
+</ParamField>
+
+<ParamField body="postal_code" type="string" required>
+  ZIP or postal code for the billing address.
+</ParamField>
+
+---
+
+## `team_plan`
+
+Workspace and plan details submitted when creating the ChatGPT Team subscription.
+
+<CodeGroup>
+
+```json config.paypal-proxy.json
+"team_plan": {
+  "plan_name": "chatgptteamplan",
+  "workspace_name": "MyWorkspace",
+  "price_interval": "month",
+  "seat_quantity": 5,
+  "promo_campaign_id": "team-1-month-free"
+}
+```
+
+</CodeGroup>
+
+<ParamField body="plan_name" type="string" default="chatgptteamplan">
+  Internal plan identifier. Keep this as `chatgptteamplan` unless OpenAI changes the plan slug.
+</ParamField>
+
+<ParamField body="workspace_name" type="string" required>
+  Display name for the new team workspace.
+</ParamField>
+
+<ParamField body="price_interval" type="string" default="month">
+  Billing interval. Use `"month"` for monthly or `"year"` for annual.
+</ParamField>
+
+<ParamField body="seat_quantity" type="number" default="5">
+  Number of seats to purchase. Minimum is 2 for Team plans.
+</ParamField>
+
+<ParamField body="promo_campaign_id" type="string">
+  Promotional campaign identifier applied at checkout. Leave empty if no promotion is active.
+</ParamField>
+
+---
+
+## `captcha`
+
+API credentials for the third-party captcha solving service used during registration.
+
+<CodeGroup>
+
+```json config.paypal-proxy.json
+"captcha": {
+  "api_url": "https://YOUR_CAPTCHA_PROVIDER",
+  "client_key": "YOUR_CAPTCHA_API_KEY"
+}
+```
+
+</CodeGroup>
+
+<ParamField body="api_url" type="string" required>
+  Base URL of your captcha solving provider's API (e.g. `https://api.2captcha.com`).
+</ParamField>
+
+<ParamField body="client_key" type="string" required>
+  Your API key for authenticating with the captcha provider.
+</ParamField>
+
+---
+
+## `proxy`
+
+SOCKS5 or HTTP proxy used for all registration requests. Set to `null` to disable proxy routing.
+
+<CodeGroup>
+
+```json config.paypal-proxy.json
+"proxy": "socks5://USER:PASS@PROXY_HOST:PORT"
+```
+
+</CodeGroup>
+
+<ParamField body="proxy" type="string">
+  A single proxy URI. Supports `socks5://`, `socks4://`, and `http://` schemes. Set to `null` to send requests without a proxy.
+</ParamField>

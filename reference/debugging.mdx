@@ -1,0 +1,292 @@
+---
+title: 'Debugging gpt-pp-team: Logs, Exceptions, and Diagnostics'
+description: 'Log locations, exception recovery steps, diagnostic commands, offline replay, mitmproxy analysis, and a "nothing changed but it broke" checklist.'
+---
+
+When a run fails, work through this page in order: check the relevant log, identify the exception, run the diagnostic commands, and verify the fix with offline or mock mode before touching production.
+
+---
+
+## Log locations
+
+| Log | Command |
+|---|---|
+| Full pipeline log | `tail -f output/logs/card.log` |
+| Daemon main log | `tail -f output/logs/daemon-*.log` |
+| hCaptcha solver artifacts (each round) | `ls -lah /tmp/hcaptcha_auto_solver_live/` |
+| PayPal browser stage screenshots | `ls -lah /tmp/paypal_*.png` |
+| Second-login OAuth screenshots | `ls -lah /tmp/rt_*.png` |
+| Daemon state snapshot | `cat output/daemon_state.json \| jq .` |
+
+---
+
+## Common exceptions
+
+<AccordionGroup>
+  <Accordion title="CheckoutSessionInactive">
+    **Cause:** The Stripe checkout session has expired. Sessions default to a 24-hour TTL, so long runs or machines that sleep and resume will hit this.
+
+    **Auto-recovery:** Set `auto_refresh_on_inactive: true` in your config. `card.py` will regenerate a fresh checkout and continue.
+
+    ```json
+    "fresh_checkout": {
+      "auto_refresh_on_inactive": true
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="ChallengeReconfirmRequired">
+    **Cause:** The hCaptcha token expired before `confirm` was submitted. Token TTL is approximately 2 minutes.
+
+    **Immediate fix:** Re-run the confirm stage.
+
+    **Root fix:** Reduce `jitter_before_run_s` in daemon config, and avoid other time-consuming operations between hCaptcha solve and confirm submission.
+  </Accordion>
+
+  <Accordion title="FreshCheckoutAuthError">
+    **Cause:** ChatGPT rejected your auth credentials. Possible reasons:
+
+    - `access_token` expired
+    - `session_token` invalidated
+    - Account banned or disabled
+    - Account hit the `add-phone` wall
+
+    **Debug:** Call the session endpoint directly to inspect the response:
+
+    ```python
+    import requests
+    r = requests.get(
+        "https://chatgpt.com/api/auth/session",
+        headers={"Cookie": "__Secure-next-auth.session-token=..."}
+    )
+    print(r.status_code, r.json())
+    ```
+
+    - `401 / token_invalidated` → re-register or refresh the `session_token`
+    - `401 / account_deactivated` → account is dead; replace it
+  </Accordion>
+
+  <Accordion title="DatadomeSliderError">
+    **Cause:** The DataDome slider challenge on the PayPal DDC or B6 step failed to solve.
+
+    **Check the most recent failure screenshot:**
+
+    ```bash
+    ls -lt /tmp/paypal_ddc_*.png | head -1
+    ```
+
+    **Check solver decisions in daemon logs:**
+
+    ```bash
+    grep "DatadomeSliderError" output/logs/daemon-*.log | tail -5
+    ```
+
+    **Daemon behavior:** Daemon retries the current round without consuming an IP burn quota slot.
+
+    **Manual debugging:** Temporarily add `page.pause()` inside `card.py::_try_solve_ddc_slider` and run once with `headless=False` to inspect the DOM.
+  </Accordion>
+
+  <Accordion title="WebshareQuotaExhausted">
+    **Cause:** The Webshare API has no available replacement proxies — monthly plan quota is exhausted.
+
+    **Daemon behavior:** Sets `webshare_rotation_disabled = true` and enters `no_rotation_cooldown_s` (default 3 hours).
+
+    **Manual recovery:** Either upgrade your Webshare plan or manually reset the flag in `daemon_state.json`:
+
+    ```bash
+    jq '.webshare_rotation_disabled = false | .no_perm_cooldown_until = 0' \
+       output/daemon_state.json > /tmp/state.json && \
+       mv /tmp/state.json output/daemon_state.json
+    ```
+  </Accordion>
+
+  <Accordion title="socks5 auth not supported">
+    **Cause:** Camoufox does not accept SOCKS5 proxies with username/password authentication.
+
+    **Fix:** Set up a local gost relay that strips auth:
+
+    ```bash
+    gost -L=socks5://:18898 -F=socks5://USER:PASS@PROXY_HOST:PORT &
+    ```
+
+    Then set your config proxy to `socks5://127.0.0.1:18898`. Daemon mode includes a built-in gost watchdog that manages this process automatically.
+  </Accordion>
+
+  <Accordion title="cannot open display">
+    **Cause:** Xvfb is not running or the `DISPLAY` environment variable was not passed.
+
+    **Fix (recommended):** Wrap with `xvfb-run`:
+
+    ```bash
+    xvfb-run -a python pipeline.py ...
+    ```
+
+    **Alternative:** Start Xvfb manually:
+
+    ```bash
+    Xvfb :99 -screen 0 1920x1080x24 &
+    DISPLAY=:99 python pipeline.py ...
+    ```
+  </Accordion>
+
+  <Accordion title="geoip InvalidIP">
+    **Cause:** The gost relay is down. Camoufox connects directly and gets an invalid egress IP.
+
+    **Daemon behavior:** `_ensure_gost_alive()` automatically detects an unbound port and restarts gost.
+
+    **Single-run fix:** Restart gost manually:
+
+    ```bash
+    pkill gost
+    gost -L=socks5://:18898 -F=socks5://USER:PASS@HOST:PORT &
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Diagnostic commands
+
+### Success rate and performance
+
+```bash
+# Overall success rate
+jq -r '.total_succeeded as $s | .total_attempts as $t | "\($s)/\($t) = \($s/$t*100)%"' \
+   output/daemon_state.json
+
+# Per-IP hit rate
+grep "current_proxy_ip" output/logs/daemon-*.log | sort | uniq -c | sort -rn
+
+# Per-zone usage count
+grep "current_zone" output/logs/daemon-*.log | sort | uniq -c
+
+# Anti-fraud trigger count
+grep -c "no_invite_permission" output/logs/daemon-*.log
+
+# 7-day account survival rate (requires gpt-team DB)
+sqlite3 /path/to/gpt-team/db/database.sqlite \
+    "SELECT
+       SUM(CASE WHEN is_banned=1 THEN 1 ELSE 0 END) AS banned,
+       SUM(CASE WHEN is_banned=0 THEN 1 ELSE 0 END) AS alive,
+       COUNT(*) AS total
+     FROM gpt_accounts
+     WHERE created_at > datetime('now', '-7 days')"
+```
+
+### hCaptcha failure analysis
+
+```bash
+# List recent failures
+ls -lt /tmp/hcaptcha_auto_solver_live/checkcaptcha_fail_*.json | head -5
+
+# View a decision JSON
+cat /tmp/hcaptcha_auto_solver_live/round_05.json | jq .
+
+# Count failures by prompt type
+for f in /tmp/hcaptcha_auto_solver_live/round_*.json; do
+    jq -r 'select(.result == "fail") | .prompt' "$f"
+done | sort | uniq -c | sort -rn
+```
+
+### PayPal stage analysis
+
+```bash
+# List all stage screenshots
+ls /tmp/paypal_*.png
+
+# Show stage distribution
+ls /tmp/paypal_*.png | sed 's/.*paypal_//;s/_[0-9]*\.png//' | sort | uniq -c
+```
+
+---
+
+## Offline and mock debugging
+
+### Offline replay (no real requests)
+
+```bash
+python CTF-pay/card.py auto --config CTF-pay/config.offline-replay.json --offline-replay
+```
+
+Replays from `flows/` packet captures without making external requests. Use this to debug `card.py` logic without needing real proxies or credentials.
+
+### Local mock gateway
+
+```bash
+python CTF-pay/card.py auto --config CTF-pay/config.local-mock.json --local-mock
+```
+
+Starts a local HTTP server that simulates the Stripe state machine. Choose one of three scenarios by configuring `local_mock_gateway.py`:
+
+| Scenario | Description |
+|---|---|
+| `challenge_pass_then_decline` | Challenge succeeds but card hits terminal decline |
+| `challenge_failed` | Challenge fails immediately |
+| `no_3ds_card_declined` | Card declined without entering 3DS |
+
+<Tip>
+Use `--local-mock` to debug challenge and 3DS state machine logic without a real card or proxy.
+</Tip>
+
+---
+
+## mitmproxy flow analysis
+
+```bash
+# Parse a flows file and list all requests
+python -c "
+from mitmproxy.io import FlowReader
+for f in FlowReader(open('flows', 'rb')).stream():
+    print(f.request.method, f.request.pretty_url)
+"
+
+# Find the Stripe protocol chain
+python -c "
+from mitmproxy.io import FlowReader
+for f in FlowReader(open('flows', 'rb')).stream():
+    if 'stripe.com' in f.request.pretty_url:
+        print(f.request.method, f.request.pretty_url, '→', f.response.status_code)
+"
+
+# Dump the request body for a specific endpoint
+python -c "
+from mitmproxy.io import FlowReader
+for f in FlowReader(open('flows', 'rb')).stream():
+    if '/v1/setup_intents/' in f.request.pretty_url and 'confirm' in f.request.pretty_url:
+        print(f.request.get_text())
+"
+```
+
+<Note>
+Treat `flows` and `flows*` artifacts as read-only ground truth. Do not modify them.
+</Note>
+
+---
+
+## "Nothing changed but it broke" checklist
+
+When behavior degrades without any local code change, work through these causes in order of likelihood:
+
+1. **Stripe runtime fingerprint drift** — `runtime.version`, `js_checksum`, or `rv_timestamp` has changed. Check open issues first; this is the most common cause.
+2. **OpenAI OAuth flow change** — A URL parameter changed or a new step was added to the auth flow.
+3. **PayPal DOM change** — A CSS selector in the Camoufox PayPal flow is no longer valid.
+4. **New hCaptcha prompt type** — The solver throws `unknown_prompt` for a type it has not seen before.
+5. **Proxy flagged** — The current exit IP has been flagged. Rotate to a new IP.
+
+Check the issue tracker before debugging locally — causes 1 and 4 are the most frequently reported and may already have a fix in progress.
+
+---
+
+## Before opening an issue
+
+Prepare the following using the `bug_report.yml` template:
+
+1. Complete stack trace (redacted)
+2. Last 50 lines of `output/logs/card.log`
+3. Most recent screenshot from `/tmp/*.png`
+4. Output of `pip freeze | grep -E "playwright|camoufox|curl_cffi|requests"`
+5. Your run mode and command-line arguments
+
+<Warning>
+Redact all tokens, cookies, real email addresses, IP addresses, and any PII before sharing logs or screenshots. Use RFC 5737 IPs (`203.0.113.x`, `198.51.100.x`, `192.0.2.x`) and `*.example` domains as replacements.
+</Warning>

@@ -1,0 +1,139 @@
+---
+title: 'Anti-Fraud Experiments: Batch Survival and IP Signals'
+description: 'Three controlled experiments on ChatGPT Team anti-fraud behavior: 45-account batch survival data, dual-proxy IP comparison, and same-ASN IP switching results.'
+---
+
+These three experiments establish the empirical foundation for the two-layer fraud model. All data comes from real production runs. IP addresses use RFC 5737 placeholder ranges; account counts and timestamps are unmodified.
+
+<Note>
+  IP addresses are RFC 5737 documentation placeholders (`203.0.113.0/24`, `198.51.100.0/24`, `192.0.2.0/24`). Domain names use `*.example`. All other values are real research data.
+</Note>
+
+## Experiment 1: 45-account batch, 24-hour survival rate
+
+### Setup
+
+- Time window: single day (~14-hour span)
+- Payment: single PayPal account (PayPal-A)
+- Egress IP: `203.0.113.10` (IP-A), single proxy throughout
+- Domains: 7 adjacent subdomains — 5 under `*.zone-a.example`, plus `zone-b.example` and `zone-c.example`
+- Total accounts created: **45**
+
+### Probe-time results
+
+At creation time, the probe layer reported:
+
+| Result | Count |
+|---|---:|
+| `probe=ok` | 32 |
+| `probe=no_permission` | 1 (`zone-c.example` — a known permanently flagged domain) |
+| Other errors | 12 |
+
+From the probe layer's perspective, 32 accounts appeared healthy and 1 domain was flagged. This view is misleading.
+
+### 24-hour survival
+
+Querying the `gpt_accounts` table after 24 hours:
+
+| Domain | Created | Banned | Survived | Avg `user_count` |
+|---|---:|---:|---:|---:|
+| `subA1.zone-a.example` | 15 | 15 | 0 | 2.3 |
+| `subA2.zone-a.example` | 8 | 8 | 0 | 4.0 |
+| `subA3.zone-a.example` | 6 | 5 | **1** | 4.0 |
+| `subA4.zone-a.example` | 5 | 5 | 0 | 4.6 |
+| `subA5.zone-a.example` | 5 | 5 | 0 | 3.6 |
+| `zone-b.example` | 5 | 5 | 0 | 3.6 |
+| `zone-c.example` | 1 | 1 | 0 | 1.0 |
+| **Total** | **45** | **44** | **1** | — |
+
+**Result: 44/45 banned = 2.2% survival at 24 hours.**
+
+### Seat fill distribution (banned accounts)
+
+Accounts with real downstream users were banned at the same rate as empty ones:
+
+| `user_count` | Banned count |
+|---|---:|
+| 5 / 5 | 17 |
+| 4 / 5 | 13 |
+| 3 / 5 | 4 |
+| 2 / 5 | 1 |
+| 1 / 5 | 8 |
+| Full + 1 invite pending | 1 |
+
+Seat fill rate has no effect on ban outcome. The ban layer evaluates creation-time cohort dimensions, not downstream usage.
+
+### Batch ban timestamps
+
+Aggregating `updated_at` values at the time `is_banned` changed:
+
+| Time window | Accounts banned |
+|---|---:|
+| 2026-04-19 12:xx UTC | 29 |
+| 2026-04-19 07:xx UTC | 4 |
+| Scattered | 11 |
+
+The ban audit runs on a fixed cron schedule (inferred: approximately `00:00 UTC` and `12:00 UTC`). The `07:xx` wave likely represents a separate batch audit window.
+
+### Survivor analysis
+
+One account survived: created on `subA3.zone-a.example` at 2026-04-18 19:03 with 5 seats filled. This is most likely an audit escape, not genuine stability.
+
+An earlier account created on `subA4.zone-a.example` at 2026-04-14 23:19 (5+1 seats) remained alive at 5 days. Accounts that predate the dense registration window appear to age out of the audit observation period and stabilize.
+
+---
+
+## Experiment 2: IP dimension comparison (dual proxy)
+
+This experiment isolates whether the probe layer signal is driven by the domain or the egress IP.
+
+### Setup
+
+- Domain pool: 10 subdomains from the same `*.zone-a.example` pool as Experiment 1
+- Payment: same PayPal-A
+- Fingerprint: same Camoufox profile
+- Two proxies compared in parallel:
+  - **Proxy X:** `203.0.113.10` — NY, ISP-A, AS-XX (same as IP-A from Experiment 1, already accumulated probe hits)
+  - **Proxy Y:** `203.0.113.20` — VA, ISP-B, AS-YY (clean IP, no prior registrations)
+
+### Results
+
+| Proxy | Egress IP | Probe `ok` count | Completed | `ok` rate |
+|---|---|---:|---:|---:|
+| X (NY) | `203.0.113.10` | 1 | 7 | **14%** |
+| Y (VA) | `203.0.113.20` | 3 | 3 | **100%** |
+
+The same subdomain (`subA3.zone-a.example`) returned `no_perm` from Proxy X and `ok` from Proxy Y.
+
+### Conclusion
+
+The domain is not the primary probe-layer signal. The egress IP is. The same domain behaves differently depending solely on which IP originates the request.
+
+---
+
+## Experiment 3: Same ASN, different IP string
+
+This experiment determines the granularity of IP-level flagging: does it apply to the ASN, the city, the ISP, or the exact IP string?
+
+### Setup
+
+- **Proxy Z:** `203.0.113.30` — same ISP (ISP-A), same city (NY), same ASN (AS-XX) as IP-A, but a different IP string
+- Tested immediately against the same subdomain pool
+
+### Results
+
+| Proxy | Egress IP | Probe `ok` | Completed | `ok` rate | First `no_perm` at attempt |
+|---|---|---:|---:|---:|---|
+| X (old NY, flagged) | `203.0.113.10` | 1 | 7 | 14% | Attempt 2 |
+| **Z (new NY, clean)** | `203.0.113.30` | **4** | **5** | **80%** | **Attempt 5** |
+
+### Conclusion
+
+Switching to a different IP string within the same ISP, city, and ASN immediately restores clean probe status. ChatGPT fingerprints at the **exact IP string level**, not at ASN, city, or ISP level.
+
+### IP lifetime
+
+Each IP supports approximately **4–5 registrations** before the probe layer returns `no_perm`. Recovery options:
+
+- **Switch IP:** immediate recovery — even a different IP within the same ASN works, as long as the IP string is different
+- **Wait a few hours:** natural recovery observed (reference: `subA1.zone-a.example` showed a brief 2-hour recovery window)

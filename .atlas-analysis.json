@@ -1,0 +1,98 @@
+{
+  "projectType": "cli-tool",
+  "projectName": "gpt-pp-team",
+  "projectDescription": "End-to-end protocol replay toolkit for ChatGPT Team subscription with a from-scratch hCaptcha visual solver, a self-healing daemon, and empirical anti-fraud research data.",
+  "theme": "aspen",
+  "primaryColor": "#94cb04",
+  "lightColor": "#545454",
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/overview",
+              "configuration/paypal-config",
+              "configuration/registration-config",
+              "configuration/environment-variables"
+            ]
+          },
+          {
+            "group": "Running the Pipeline",
+            "pages": [
+              "running/operating-modes",
+              "running/daemon-mode",
+              "running/webui"
+            ]
+          },
+          {
+            "group": "hCaptcha Solver",
+            "pages": [
+              "hcaptcha/overview",
+              "hcaptcha/extending"
+            ]
+          },
+          {
+            "group": "Reference & Troubleshooting",
+            "pages": [
+              "reference/architecture",
+              "reference/debugging",
+              "reference/contributing"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Research",
+        "groups": [
+          {
+            "group": "Anti-Fraud Research",
+            "pages": [
+              "research/overview",
+              "research/experiments",
+              "research/fraud-model",
+              "research/mitigation"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "End-to-end Stripe Checkout → PayPal billing → ChatGPT Team → Codex OAuth protocol replay",
+    "From-scratch hCaptcha visual solver: VLM primary path + CLIP/OpenCV heuristic fallback, 12 known challenge types",
+    "Self-healing 12-loop daemon for unattended multi-week operation",
+    "Automatic IP rotation via Webshare API + gost relay watchdog",
+    "Multi-zone Cloudflare catch-all subdomain pool with auto-provisioning and DNS quota cleanup",
+    "Anti-fraud empirical research: probe-layer vs. ban-layer separation, batch association mechanics",
+    "Web UI configuration wizard (14-step setup + real-time SSE log streaming)",
+    "Four operating modes: single-run, batch parallel, self-dealer, and daemon"
+  ],
+  "publicApiSurface": [
+    "pipeline.py --config <path> --paypal",
+    "pipeline.py --daemon",
+    "pipeline.py --batch N --workers M",
+    "pipeline.py --self-dealer N",
+    "pipeline.py --register-only",
+    "pipeline.py --pay-only",
+    "CTF-pay/card.py auto --config <path>",
+    "CTF-pay/card.py fresh --fresh-only --config <path>",
+    "CTF-pay/card.py auto --offline-replay",
+    "CTF-pay/card.py auto --local-mock",
+    "CTF-pay/hcaptcha_auto_solver.py <bridge-url> [--headed] [--no-vlm] [--vlm-model <model>]",
+    "CTF-pay/hcaptcha_bridge_helper.py <url>",
+    "CTF-pay/retry_house_decline.py <session_id> --attempts N",
+    "python -m webui.server"
+  ]
+}

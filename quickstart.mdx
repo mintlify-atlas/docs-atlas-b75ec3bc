@@ -1,81 +1,155 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
-icon: 'rocket'
+title: "gpt-pp-team Quickstart: Clone to First Completed Run"
+description: "Go from a fresh clone to a completed pipeline writing a Codex OAuth refresh token to output/results.jsonl, covering config, dependencies, and the run command."
 ---
 
-## Get started in three steps
+This guide gets you to a running pipeline as quickly as possible. It assumes you have the prerequisites: a loginable PayPal account, an EU/US proxy, a Cloudflare zone, and a Linux host. If you need to verify any of these, see [Introduction](/introduction#prerequisites).
 
-Get your documentation site running locally and make your first customization.
+<Warning>
+  Running this pipeline implies agreement to all terms in [NOTICE](https://github.com/DanOps-1/gpt-pp-team/blob/main/NOTICE). Authorized use only — your own systems, CTF, or explicit bug bounty in-scope assets.
+</Warning>
 
-### Step 1: Set up your local environment
+<Steps>
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+<Step title="Clone the repository and install core dependencies">
 
-### Step 2: Deploy your changes
+Clone the repo and install the Python packages the pipeline requires.
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+```bash
+git clone https://github.com/DanOps-1/gpt-pp-team
+cd gpt-pp-team
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+pip install requests curl_cffi playwright camoufox browserforge mitmproxy pybase64
+playwright install firefox
+camoufox fetch
+```
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+<Note>
+  `camoufox fetch` downloads a browser binary from GitHub. This may take a few minutes depending on your network. See [Installation troubleshooting](/installation#common-installation-issues) if it stalls.
+</Note>
 
-### Step 3: Go live
+</Step>
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+<Step title="Copy the config templates">
+
+The pipeline reads two config files. Copy the examples into place — the pipeline expects these exact filenames.
+
+```bash
+cp CTF-pay/config.paypal.example.json       CTF-pay/config.paypal.json
+cp CTF-reg/config.paypal-proxy.example.json CTF-reg/config.paypal-proxy.json
+```
+
+</Step>
+
+<Step title="Fill in the required config fields">
+
+Open `CTF-pay/config.paypal.json` in your editor and fill in at minimum:
+
+- **proxy** — your SOCKS5 or HTTP proxy URL (e.g. `socks5://127.0.0.1:18898`). If your proxy requires authentication, run a `gost` relay first — see [Installation Step 2](/installation#step-2-install-gost-socks5-relay).
+- **paypal fields** — the email address associated with your PayPal account.
+- **cloudflare** — your Cloudflare API token and zone for catch-all subdomain provisioning.
+
+Open `CTF-reg/config.paypal-proxy.json` and fill in your proxy and registration domain settings.
+
+<Tip>
+  For a full description of every field and its accepted values, see [Configuration overview](/configuration/overview). The web UI wizard (`python -m webui.server`) can generate both config files interactively in about 15 minutes if you prefer a guided approach.
+</Tip>
+
+</Step>
+
+<Step title="Complete the first PayPal login">
+
+The first run opens a Camoufox browser window so you can log in to PayPal and complete OTP 2FA manually. This step is required once per machine to establish a trusted device session.
+
+<Warning>
+  Before running: in your PayPal account, go to **Settings → Login management** and remove your mobile device. If mobile push is active, PayPal sends OTP to the app instead of email and the automation will stall.
+</Warning>
+
+```bash
+xvfb-run -a python pipeline.py --config CTF-pay/config.paypal.json --paypal
+```
+
+After you complete the login, the session is persisted to `CTF-pay/paypal_cf_persist/` (gitignored) and reused automatically on all future runs.
+
+</Step>
+
+<Step title="Run the full pipeline">
+
+With the PayPal session established, run the complete pipeline:
+
+<CodeGroup>
+
+```bash Single run
+xvfb-run -a python pipeline.py --config CTF-pay/config.paypal.json --paypal
+```
+
+```bash Continuous daemon mode
+xvfb-run -a python pipeline.py --config CTF-pay/config.paypal.json --paypal --daemon
+```
+
+</CodeGroup>
+
+The pipeline runs through these stages in sequence: account registration (Camoufox + Turnstile), Stripe Checkout replay, PayPal billing agreement authorization, ChatGPT subscription approval, and Codex OAuth + PKCE token extraction.
+
+</Step>
+
+</Steps>
+
+## Expected output
+
+A successful run writes one JSON line per completed pipeline to `output/results.jsonl`. Each line contains the extracted Codex OAuth refresh token and associated metadata.
+
+```json
+{
+  "ts": "2026-04-29T14:32:10Z",
+  "status": "succeeded",
+  "chatgpt_email": "abc123@subdomain.example.com",
+  "session_id": "cs_live_a1b2c3...",
+  "channel": "paypal",
+  "team_account_id": "38a7aff4-...-...",
+  "refresh_token": "rt_...",
+  "invite_permission": "ok",
+  "team_gpt_account_pk": 12345,
+  "email_domain": "subdomain.example.com",
+  "cpa_import": {"status": "ok", "account_id": "..."}
+}
+```
+
+<Note>
+  The `output/` directory is gitignored. It will not be committed even if you stage everything with `git add .`.
+</Note>
+
+## Timing expectations
+
+- **First run** (includes config tuning and manual PayPal login): 1–3 hours
+- **Subsequent single runs** (daemon stable): approximately 5 minutes per pipeline
+
+The bulk of first-run time is config adjustment — proxy validation, Cloudflare token verification, and PayPal session establishment — not the protocol replay itself.
+
+## Troubleshooting first-run failures
+
+If the pipeline fails before completing, check `CTF-pay/log.txt` for the last stage reached and any error messages. Common first-run issues:
+
+- **Proxy errors** — verify your proxy URL format and that gost is running if your proxy requires auth
+- **PayPal stall** — ensure mobile push notifications are disabled in your PayPal account
+- **`cannot open display`** — prefix the command with `xvfb-run -a` or set `DISPLAY` manually
+- **CF DNS errors** — verify your Cloudflare API token has `Zone:DNS:Edit` permission on the correct zone
+
+See [Debugging](/reference/debugging) for a full list of common errors and diagnostic commands.
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Configuration overview" icon="sliders" href="/configuration/overview">
+    Every JSON config field, environment variable, and schema — read this before tuning for production.
+  </Card>
+  <Card title="Operating modes" icon="play" href="/running/operating-modes">
+    Batch parallel, self-dealer, and daemon mode parameters for sustained unattended operation.
+  </Card>
+  <Card title="Daemon mode" icon="arrows-rotate" href="/running/daemon-mode">
+    How the 12 self-healing loops work and which failure conditions each one handles.
+  </Card>
+  <Card title="hCaptcha solver" icon="robot" href="/hcaptcha/overview">
+    Three-layer solver architecture, supported challenge types, and VLM endpoint configuration.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

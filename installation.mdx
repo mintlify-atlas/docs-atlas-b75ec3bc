@@ -1,0 +1,267 @@
+---
+title: "Installing gpt-pp-team on Linux: Complete Setup Guide"
+description: "Step-by-step installation of system packages, gost SOCKS5 relay, Python dependencies, Playwright, the optional ML venv, and Cloudflare API token configuration."
+---
+
+This guide walks you through every installation step on Linux (Ubuntu 22.04+ or equivalent). Follow the steps in order — later steps depend on earlier ones.
+
+<Warning>
+  By installing and running gpt-pp-team you accept all terms in [NOTICE](https://github.com/DanOps-1/gpt-pp-team/blob/main/NOTICE). Permitted only for authorized systems, CTF, and bug bounty in-scope assets. Fraud and TOS violations are prohibited.
+</Warning>
+
+## System requirements
+
+- **OS**: Linux — Ubuntu 22.04+, Debian 11+, Kali, or any systemd distribution
+- **Python**: 3.11+
+- **RAM**: 2 GB minimum (hCaptcha solver and Camoufox run concurrently)
+- **Disk**: ~500 MB for the core install; ~5 GB total with the ML venv
+- **Network**: Access to OpenAI, Stripe, PayPal, and Cloudflare APIs
+
+<Steps>
+
+<Step title="Install system packages">
+
+Install the base system packages. These cover the virtual framebuffer (`xvfb`) needed to run Camoufox headlessly, and the utilities used by the pipeline and daemon.
+
+```bash
+sudo apt update && sudo apt install -y \
+    python3 python3-pip python3-venv \
+    xvfb \
+    curl wget git \
+    sqlite3 jq
+```
+
+</Step>
+
+<Step title="Install gost SOCKS5 relay">
+
+Camoufox does not support authenticated SOCKS5 proxies directly. `gost` acts as a local relay that strips credentials before passing the connection to your upstream proxy.
+
+```bash
+sudo curl -sSfL \
+    https://github.com/go-gost/gost/releases/latest/download/gost-linux-amd64 \
+    -o /usr/local/bin/gost && sudo chmod +x /usr/local/bin/gost
+```
+
+<Note>
+  The daemon mode includes a built-in gost watchdog that manages this process automatically. You only need to start gost manually for initial testing or single-run mode.
+</Note>
+
+</Step>
+
+<Step title="Clone the repo and install core Python dependencies">
+
+Clone the repository and install the core Python packages. All packages go into your active Python environment (virtualenv or system).
+
+```bash
+git clone https://github.com/DanOps-1/gpt-pp-team
+cd gpt-pp-team
+
+pip install requests curl_cffi playwright camoufox browserforge mitmproxy pybase64
+```
+
+</Step>
+
+<Step title="Install Playwright Firefox and Camoufox browser binaries">
+
+Download the Firefox binary used by Playwright, then fetch the Camoufox antidetect browser build.
+
+```bash
+playwright install firefox
+camoufox fetch
+```
+
+<Note>
+  `camoufox fetch` downloads a release from GitHub. On slow or restricted networks this can take several minutes. See [troubleshooting](#common-installation-issues) below if the download stalls.
+</Note>
+
+</Step>
+
+<Step title="Install the optional ML venv for the hCaptcha solver">
+
+The hCaptcha solver's ML dependencies (PyTorch, Transformers, OpenCV) are large — approximately 4 GB. Install them into a dedicated virtualenv to avoid polluting your main environment.
+
+```bash
+python -m venv ~/.venvs/ctfml
+~/.venvs/ctfml/bin/pip install \
+    torch transformers \
+    opencv-python pillow numpy
+```
+
+<Tip>
+  Skipping this step is fine. Without the ML venv, the solver bypasses heuristic fallback and relies entirely on the VLM endpoint. On residential or residential-like IPs, hCaptcha is rarely triggered anyway.
+</Tip>
+
+</Step>
+
+<Step title="Copy config templates">
+
+Copy the example config files into place. Do not edit the `.example.json` files directly — the pipeline and daemon expect the non-example filenames.
+
+```bash
+cp CTF-pay/config.paypal.example.json       CTF-pay/config.paypal.json
+cp CTF-reg/config.paypal-proxy.example.json CTF-reg/config.paypal-proxy.json
+cp CTF-reg/config.example.json              CTF-reg/config.noproxy.json
+```
+
+See [Configuration overview](/configuration/overview) for a complete field reference.
+
+</Step>
+
+<Step title="Set up the Cloudflare API token">
+
+If you want automatic catch-all subdomain provisioning (required for multi-zone domain pool operation), create a Cloudflare API token:
+
+1. Log in to [https://dash.cloudflare.com/profile/api-tokens](https://dash.cloudflare.com/profile/api-tokens)
+2. Click **Create Token** → **Custom token**
+3. Set these permissions:
+   - `Zone` → `DNS` → `Edit`
+   - `Zone` → `Zone` → `Read`
+4. Set **Zone Resources** to the zone(s) you want to manage
+5. Create the token, then write it to `output/secrets.json`:
+
+```json
+{
+  "cloudflare": {
+    "api_token": "your-token-here",
+    "forward_to": "admin@example.com"
+  }
+}
+```
+
+<Note>
+  The `output/` directory is already listed in `.gitignore` and will not be committed.
+</Note>
+
+</Step>
+
+<Step title="Complete the first PayPal login">
+
+The first pipeline run opens a Camoufox browser window so you can log in to PayPal manually and complete the OTP 2FA challenge. This establishes a trusted device session that is persisted to `CTF-pay/paypal_cf_persist/` (gitignored) and reused for all subsequent runs.
+
+```bash
+xvfb-run -a python pipeline.py --config CTF-pay/config.paypal.json --paypal
+```
+
+<Warning>
+  **Remote servers**: use VNC or X11 forwarding so you can see the Camoufox window, or temporarily remove `xvfb-run -a` and set a real `DISPLAY`. Alternatively, copy an already-logged-in `paypal_cf_persist/` directory from another machine.
+
+  **Before you run**: in your PayPal account settings, go to **Settings → Login management** and remove your mobile device. If mobile push is enabled, PayPal sends the OTP to the app instead of email, and the automation stalls.
+</Warning>
+
+After you complete the login, cookies are persisted automatically. Subsequent runs reuse the trusted device state without prompting.
+
+</Step>
+
+</Steps>
+
+## Verify the installation
+
+Run these four commands. Each should print a success message or version string.
+
+```bash
+# Verify core Python packages
+python -c "import camoufox, playwright, curl_cffi; print('core ok')"
+
+# Verify ML venv (skip if you didn't install it)
+~/.venvs/ctfml/bin/python -c "import torch, transformers, cv2; print('ml ok')"
+
+# Verify gost
+gost -V
+
+# Verify xvfb
+which xvfb-run
+```
+
+All four returning OK means you are ready to run the pipeline.
+
+## Common installation issues
+
+<AccordionGroup>
+
+<Accordion title="camoufox fetch is slow or fails to download">
+
+On restricted networks, pulling the GitHub release can be slow or time out. Pass a proxy:
+
+```bash
+HTTPS_PROXY=http://127.0.0.1:7890 camoufox fetch
+```
+
+Or download the release manually from [https://github.com/daijro/camoufox/releases](https://github.com/daijro/camoufox/releases) and place it in `~/.cache/camoufox/`.
+
+</Accordion>
+
+<Accordion title="playwright install firefox fails">
+
+Try an alternative download host:
+
+```bash
+PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright \
+    playwright install firefox
+```
+
+</Accordion>
+
+<Accordion title="torch install is slow or fails">
+
+Install the CPU-only build, which is significantly smaller:
+
+```bash
+~/.venvs/ctfml/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+```
+
+If your machine has a GPU and you want CUDA support:
+
+```bash
+~/.venvs/ctfml/bin/pip install torch --index-url https://download.pytorch.org/whl/cu121
+```
+
+</Accordion>
+
+<Accordion title="Camoufox reports 'socks5 auth not supported'">
+
+This is expected behavior. Camoufox does not support authenticated SOCKS5 proxies. Start a local gost relay that strips the credentials:
+
+```bash
+gost -L=socks5://:18898 -F=socks5://USER:PASS@PROXY_HOST:PORT &
+```
+
+Then set your config proxy to `socks5://127.0.0.1:18898`. In daemon mode, the built-in gost watchdog manages this relay automatically.
+
+</Accordion>
+
+<Accordion title="Pipeline reports 'cannot open display'">
+
+Either `xvfb` is not running or the `DISPLAY` environment variable is not set. Use `xvfb-run` to wrap the command:
+
+```bash
+xvfb-run -a python pipeline.py --config CTF-pay/config.paypal.json --paypal
+```
+
+Or start Xvfb manually:
+
+```bash
+Xvfb :99 -screen 0 1920x1080x24 &
+DISPLAY=:99 python pipeline.py --config CTF-pay/config.paypal.json --paypal
+```
+
+</Accordion>
+
+</AccordionGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run your first complete pipeline and see output in `output/results.jsonl`.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/configuration/overview">
+    Fill in every config field correctly before your first live run.
+  </Card>
+  <Card title="Operating modes" icon="play" href="/running/operating-modes">
+    Single-run, batch, self-dealer, and daemon modes with full parameter reference.
+  </Card>
+  <Card title="Debugging" icon="bug" href="/reference/debugging">
+    Common runtime errors, artifact paths, and diagnostic commands.
+  </Card>
+</CardGroup>

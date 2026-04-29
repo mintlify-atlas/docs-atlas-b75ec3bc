@@ -1,0 +1,264 @@
+---
+title: 'hCaptcha Auto-Solver: Three-Layer Architecture Reference'
+description: 'Learn how the standalone hCaptcha auto-solver works: its three-layer VLM, CLIP/OpenCV, and Playwright architecture, variation retry system, and how to run it.'
+---
+
+`CTF-pay/hcaptcha_auto_solver.py` is a standalone ~4,000-line visual solver for hCaptcha challenges. `card.py` invokes it via `subprocess` — not `import` — because its ML dependencies (`torch`, `transformers`, `playwright`) live in a separate `~/.venvs/ctfml` virtual environment. It works against any hCaptcha bridge URL, not just the Stripe scenario.
+
+## Three-layer decision architecture
+
+Every challenge round flows through three layers. If an upper layer succeeds, execution skips the layers below it.
+
+<Steps>
+  <Step title="Layer 1 — VLM (primary)">
+    Sends the challenge screenshot plus an overlay to any OpenAI-compatible `/v1/chat/completions` endpoint. Two sub-modes: candidate frame (preferred) and direct coordinate (fallback).
+  </Step>
+  <Step title="Layer 2 — CLIP / OpenCV heuristics">
+    Pattern-matches the prompt text against 12 known challenge types and runs the matching specialist solver using CLIP embeddings, edge detection, or shape IoU.
+  </Step>
+  <Step title="Layer 3 — Playwright executor">
+    Translates solver output into human-like browser interactions with anti-detection patches, Bézier motion synthesis, and a visual-feedback retry loop.
+  </Step>
+</Steps>
+
+## Layer 1 — VLM decision
+
+The VLM layer calls any endpoint that speaks the OpenAI chat completions format. It operates in two modes depending on whether candidate regions can be extracted from the current frame.
+
+<Tabs>
+  <Tab title="Candidate frame mode">
+    OpenCV extracts clickable or draggable targets and labels them `G1`, `G2`, `S1`, `T1` on an overlay image. The VLM receives the original screenshot, the labeled overlay, and a JSON candidate list, then returns IDs.
+
+    **Request structure:**
+
+    ```json
+    {
+      "messages": [
+        {"role": "system", "content": "You are an hCaptcha solver..."},
+        {"role": "user", "content": [
+          {"type": "text", "text": "Prompt: please click on all the water travel"},
+          {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}},
+          {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}},
+          {"type": "text", "text": "{\"candidates\": [{\"id\": \"G1\", \"bbox\": [...]}, ...]}"}
+        ]}
+      ]
+    }
+    ```
+
+    **Response structure:**
+
+    ```json
+    {"action": "click", "selected_ids": ["G1", "G3"]}
+    {"action": "drag",  "source_id": "S1", "target_id": "T2"}
+    ```
+  </Tab>
+  <Tab title="Direct coordinate mode">
+    When candidate extraction fails, the solver falls back to asking the VLM for normalized `[x, y]` coordinates directly. The VLM looks at the raw screenshot and returns proportional positions (0.0–1.0).
+
+    **Response structure:**
+
+    ```json
+    {"action": "click", "coords": [[0.31, 0.42], [0.73, 0.41]]}
+    {"action": "drag",  "from": [0.2, 0.5], "to": [0.7, 0.5]}
+    ```
+
+    <Note>Direct coordinate mode is less precise than candidate frame mode because it relies on the VLM's spatial reasoning rather than OpenCV-verified bounding boxes.</Note>
+  </Tab>
+</Tabs>
+
+### VLM configuration
+
+Set the endpoint, key, and model via environment variables:
+
+```bash
+export CTF_VLM_BASE_URL="https://api.openai.com/v1"
+export CTF_VLM_API_KEY="sk-..."
+export CTF_VLM_MODEL="gpt-4o"
+```
+
+You can also pass `--vlm-base-url`, `--vlm-api-key`, and `--vlm-model` on the command line to override the environment variables for a single run.
+
+## Layer 2 — CLIP / OpenCV heuristics
+
+When the VLM is disabled or fails, the solver matches the challenge prompt against 12 known types and delegates to the appropriate specialist function.
+
+### Known challenge types
+
+| Prompt keywords | Solver function | Methods used |
+|---|---|---|
+| `water travel` / `vehicle...water` | `solve_water_travel()` | CLIP binary classification, 3×3 grid or object candidates |
+| `drag` / `complete the pair` | `solve_pair_drag()` | Color clustering (source) + skeleton matching (target) |
+| `missing piece` / `complete the image` | `solve_missing_pieces_drag()` | HSV slot detection + shape IoU |
+| `float on water` | `solve_float_on_water()` | CLIP binary classification |
+| `served hot` | `solve_hot_food()` | CLIP binary classification |
+| `hop or jump` / `hopping` | `solve_hop_animals()` | CLIP sliding window + clustering + two-stage scoring |
+| `produce heat to work` | `solve_heat_work()` | CLIP binary classification |
+| `shiny thing` | `solve_shiny_thing()` | CLIP binary classification (single-select) |
+| `kept outside` | `solve_kept_outside()` | CLIP binary classification |
+| `dissolve or melt` | `solve_dissolve_melt()` | CLIP multi-label classification |
+| `hidden under the reference object` | `solve_hidden_under_reference()` | Edge detection + connected components |
+| `complete the road` + `finish line` | `solve_road_completion()` | Edge detection + connected components |
+
+### Candidate region extraction
+
+Before a CLIP solver scores tiles, the solver extracts candidate regions using one of two strategies:
+
+**Grid mode (`detect_label_grid`)** targets standard 3×3 hCaptcha grids. It detects three equally-spaced bands using row/column pixel variance or non-white statistics. A frame passes as a grid when both of the following hold:
+
+- Coverage ≥ 72%
+- Balance ≥ 55%
+
+**Object mode (`_build_object_candidates_generic`)** handles non-standard layouts. It applies Canny edge detection, connected-component analysis, and morphological denoising to isolate individual objects. The solver falls back to this mode when the grid thresholds are not met.
+
+## Layer 3 — Playwright executor
+
+### Anti-detection
+
+The executor patches `navigator` properties via an `init_script` injected before page load:
+
+```javascript
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+// + several more properties
+```
+
+### Human motion synthesis
+
+- **Clicks:** 4-point Bézier curve approach with 200–400 ms random delay per click.
+- **Drags:** 3-segment interpolated path with jitter applied at start, midpoint, and end.
+- **Pauses:** inter-action pauses drawn from a normal distribution with mean 800 ms ± 300 ms.
+
+### Visual feedback retry loop
+
+After each interaction, the executor captures before-and-after frames and computes two metrics:
+
+```python
+changed_pixels = np.sum(np.any(frame_after != frame_before, axis=-1))
+mean_diff = np.mean(np.abs(frame_after.astype(int) - frame_before.astype(int)))
+```
+
+An action is considered "landed" when `changed_pixels > THRESHOLD_PIXELS` and `mean_diff > THRESHOLD_DIFF`. If neither threshold is met, the executor automatically shifts the target and retries:
+
+- **Click:** ±10 px / ±16 px in eight cardinal directions plus the original point — 9 attempts total.
+- **Drag:** 5 source-point jitter variants × 5 target-point jitter variants — 25 combinations total.
+
+### Multi-raster source
+
+The executor prefers `canvas.toDataURL()` to get the raw bitmap. When hCaptcha renders tiles into an SVG instead of a canvas (leaving the canvas blank), it falls back to `body.screenshot()`.
+
+### Network monitoring
+
+The executor listens to all responses from `hcaptcha.com` and intercepts two endpoints:
+
+```python
+page.on("response", lambda r: ...)
+# /getcaptcha  → extracts prompt text and ekey
+# /checkcaptcha → extracts pass/fail status
+```
+
+Extracted metadata is written to `round_XX.json` in the output directory.
+
+## Variation retry system
+
+Solvers return an ordered sequence of candidate answers rather than a single answer, so the retry loop can try progressively weaker hypotheses without re-running the solver.
+
+### Click variations
+
+`candidate_click_sets` is sorted from highest to lowest CLIP confidence:
+
+1. **Strong set** — all tiles with confidence ≥ 0.5
+2. **Medium set** — all tiles with confidence ≥ 0.3
+3. **Single-item sets** — each candidate tile submitted individually
+
+### Drag variations
+
+`build_drag_target_variations()` and `build_drag_start_variations()` each produce jitter variants:
+
+- Source jitter: ±5 px / ±10 px — 5 points
+- Target jitter: ±5 px / ±10 px — 5 points
+- Total combinations: 5 × 5 = 25
+
+### Image hash deduplication
+
+Already-attempted answers for the same challenge image are skipped:
+
+```python
+key = (prompt_text, hashlib.sha1(image_bytes).hexdigest())
+exhausted_variations[key].add(variation_id)
+```
+
+When all variations are exhausted, the solver raises one of:
+
+```python
+class drag_variations_exhausted(Exception): pass
+class click_set_variations_exhausted(Exception): pass
+```
+
+`card.py` catches these and triggers the daemon's "re-run current round" branch.
+
+## Standalone invocation
+
+Run the solver directly against any bridge URL using the `ctfml` venv:
+
+<CodeGroup>
+
+```bash headed mode
+~/.venvs/ctfml/bin/python CTF-pay/hcaptcha_auto_solver.py \
+  http://127.0.0.1:PORT/index.html --headed --timeout 300
+```
+
+```bash heuristics only (no VLM)
+~/.venvs/ctfml/bin/python CTF-pay/hcaptcha_auto_solver.py \
+  http://127.0.0.1:PORT/index.html --no-vlm
+```
+
+```bash custom VLM endpoint
+~/.venvs/ctfml/bin/python CTF-pay/hcaptcha_auto_solver.py \
+  http://127.0.0.1:PORT/index.html \
+  --vlm-base-url https://api.openai.com/v1 \
+  --vlm-api-key sk-xxx \
+  --vlm-model gpt-4o
+```
+
+```bash with verify URL
+~/.venvs/ctfml/bin/python CTF-pay/hcaptcha_auto_solver.py \
+  http://127.0.0.1:PORT/index.html \
+  --verify-url      "https://api.stripe.com/v1/setup_intents/.../verify_challenge" \
+  --verify-client-secret "seti_xxx_secret_xxx" \
+  --verify-key      "pk_live_xxx"
+```
+
+</CodeGroup>
+
+## Debug artifacts
+
+All output lands in `--out-dir` (default: `/tmp/hcaptcha_auto_solver`).
+
+| File | Contents |
+|---|---|
+| `round_XX.png` | Screenshot captured at the start of each round |
+| `round_XX.json` | Full decision metadata: prompt, candidate boxes, VLM response, final decision, visual feedback values |
+| `checkcaptcha_pass_*.json` | Network snapshot from a passing `/checkcaptcha` response |
+| `checkcaptcha_fail_*.json` | Network snapshot from a failing `/checkcaptcha` response |
+| `session_meta_*.json` | Whole-session metadata |
+
+To inspect a failed round:
+
+```bash
+# Find the most recent failure
+ls -lt /tmp/hcaptcha_auto_solver_live/checkcaptcha_fail_*.json | head -1
+
+# Inspect the decision trace
+cat /tmp/hcaptcha_auto_solver_live/round_05.json | jq .
+```
+
+## Performance tuning
+
+| Symptom | Recommended action |
+|---|---|
+| **VLM slow** | Lower `vlm.timeout_s` so the solver falls back to heuristics sooner |
+| **VLM inaccurate** | Switch to a stronger model (e.g., `gpt-4o` → `claude-opus-4-7`) or refine the system prompt |
+| **CLIP slow** | Install a GPU build of PyTorch: `pip install torch --index-url https://download.pytorch.org/whl/cu121` |
+| **Too many retries** | Lower `max_click_retries` / `max_drag_retries` and let the daemon re-queue the round |
+| **Unknown challenge type** | Add a new solver — see [Extending the solver](/hcaptcha/extending) |

@@ -1,133 +1,61 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
-icon: 'star'
+title: "gpt-pp-team: ChatGPT Team Subscription Replay Toolkit"
+description: "End-to-end replay toolkit for ChatGPT Team subscriptions. Includes a from-scratch hCaptcha solver, self-healing daemon, and empirical anti-fraud research."
 ---
 
-## Setting up
+gpt-pp-team is a protocol replay toolkit for the ChatGPT Team subscription flow — covering the full chain from Stripe Checkout through PayPal billing agreement to Codex OAuth token extraction. It includes a standalone hCaptcha visual solver (VLM + CLIP/OpenCV), a 12-loop self-healing daemon for unattended operation, and real empirical data on how ChatGPT's anti-fraud mechanisms behave.
 
-Get your documentation site up and running in minutes.
+<Warning>
+  **Authorized use only.** Using this toolkit implies agreement to all terms in [NOTICE](https://github.com/DanOps-1/gpt-pp-team/blob/main/NOTICE). Permitted only for systems you own, authorized CTF/bug bounty in-scope assets, and security research. Fraud, payment circumvention, and TOS violations are strictly prohibited. All legal responsibility lies with the operator.
+</Warning>
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
+## Get started
 
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install system dependencies, Python packages, and the optional ML venv for the hCaptcha solver.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run your first complete pipeline — register, pay, and extract a Codex OAuth refresh token.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Configuration" icon="sliders" href="/configuration/overview">
+    Learn every config field across the two JSON config files and key environment variables.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Operating modes" icon="play" href="/running/operating-modes">
+    Single-run, batch parallel, self-dealer, and daemon modes explained with real command examples.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Key capabilities
 
-Everything you need to create world-class documentation.
+<CardGroup cols={2}>
+  <Card title="hCaptcha solver" icon="robot" href="/hcaptcha/overview">
+    Three-layer solver: VLM primary, CLIP/OpenCV heuristics for 12 known types, Playwright human-motion executor.
+  </Card>
+  <Card title="Daemon mode" icon="arrows-rotate" href="/running/daemon-mode">
+    12-loop self-healing daemon: auto IP rotation, gost watchdog, CF DNS cleanup, DataDome drag solver.
+  </Card>
+  <Card title="Web UI wizard" icon="window" href="/running/webui">
+    14-step configuration wizard with real-time SSE log streaming, compressing 1–3 hours of setup to ~15 minutes.
+  </Card>
+  <Card title="Architecture" icon="diagram-project" href="/reference/architecture">
+    Full breakdown of subsystems, file roles, and the Stripe → PayPal → Codex protocol chain.
+  </Card>
+</CardGroup>
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+## Research
 
-## Make your content agent ready
-
-Make your docs work for humans and AI agents alike.
-
-<Columns cols={2}>
-  <Card
-    title="Prompt component"
-    icon="robot"
-    href="/agent-ready/prompt"
-  >
-    Embed shareable AI prompts readers can copy or open in Cursor.
+<CardGroup cols={2}>
+  <Card title="Anti-fraud research" icon="flask" href="/research/overview">
+    Empirical data on ChatGPT's two-layer anti-fraud mechanism: probe layer vs. batch ban layer.
   </Card>
-  <Card
-    title="Visibility"
-    icon="eye"
-    href="/agent-ready/visibility"
-  >
-    Show different content to humans and agents reading your docs.
+  <Card title="Experiments" icon="chart-bar" href="/research/experiments">
+    Three controlled experiments: 45-account batch survival rate, IP dimension comparison, ASN-level targeting.
   </Card>
-  <Card
-    title="Contextual menu"
-    icon="bolt"
-    href="/agent-ready/contextual"
-  >
-    Give readers one-click access to Claude, ChatGPT, Cursor, and more.
+  <Card title="Fraud model" icon="shield-halved" href="/research/fraud-model">
+    Corrected two-layer model of how ChatGPT's fraud detection actually works, refuting early assumptions.
   </Card>
-  <Card
-    title="AI coding tools"
-    icon="wand-magic-sparkles"
-    href="/ai-tools/claude-code"
-  >
-    Set up Claude Code, Cursor, or Windsurf with Mintlify's skill.
+  <Card title="Mitigation strategies" icon="shield-check" href="/research/mitigation">
+    Engineering approaches to improve 24-hour account survival rate based on experimental findings.
   </Card>
-</Columns>
-
-## Need inspiration?
-
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+</CardGroup>
